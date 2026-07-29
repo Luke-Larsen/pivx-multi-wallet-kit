@@ -188,6 +188,14 @@ const shieldTx = wallet.sendShield({
   block_height: chainTip,
 }, params);
 
+// Pay several recipients from shield notes. Unlike the transparent
+// multi-send, shield and transparent destinations can be mixed in one
+// transaction, and each shield recipient can carry its own memo.
+const shieldSplit = wallet.sendShieldToMany({ recipients: [
+  { address: shieldAddress,      amount: 95_000_000n, memo: 'invoice 41' },
+  { address: transparentAddress, amount:  5_000_000n },
+]}, chainTip + 1, params);
+
 // Consumer broadcasts `shieldTx.txhex` via whatever transport it chooses.
 
 // Encrypt before persisting to localStorage / IndexedDB:

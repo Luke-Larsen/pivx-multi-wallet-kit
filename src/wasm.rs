@@ -423,6 +423,63 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Build one shield-source transaction paying multiple recipients.
+    ///
+    /// Unlike `sendTransparentToMany`, recipients may mix shield (`ps1...`)
+    /// and transparent (`D...`) addresses in the same transaction — the funds
+    /// come from shield notes either way. Each shield recipient may carry its
+    /// own `memo`; a memo on a transparent recipient is an error rather than
+    /// being silently dropped, since PIVX has nowhere to put it.
+    ///
+    /// Outputs are added in the order given, with shield change last.
+    /// `result.amount` is the recipient total, excluding change and fee.
+    ///
+    /// ```js
+    /// const tx = wallet.sendShieldToMany({ recipients: [
+    ///   { address: shieldAddr,      amount: 95000000n, memo: 'invoice 41' },
+    ///   { address: transparentAddr, amount:  5000000n, memo: '' },
+    /// ]}, chainTip + 1, params);
+    /// ```
+    #[wasm_bindgen(js_name = sendShieldToMany)]
+    pub fn send_shield_to_many(
+        &mut self,
+        recipients: ShieldRecipientsInput,
+        block_height: u32,
+        params: &SaplingParams,
+    ) -> Result<TransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        crate::sapling::builder::create_shield_transaction_to_many(
+            &mut self.inner,
+            &recipients.recipients,
+            block_height,
+            &params.inner,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee for `sendShieldToMany` against the current note set.
+    ///
+    /// Derives the output shape from the same code the builder uses, so the
+    /// returned fee is exactly what `sendShieldToMany` will charge for the
+    /// same recipient list.
+    #[wasm_bindgen(js_name = estimateSendShieldFeeToMany)]
+    pub fn estimate_send_shield_fee_to_many(
+        &self,
+        recipients: ShieldRecipientsInput,
+    ) -> Result<u64, JsError> {
+        let (t_outs, s_outs, total) =
+            crate::sapling::builder::shield_recipient_fee_shape(&recipients.recipients)
+                .map_err(js_err)?;
+        let selection = crate::sapling::builder::select_shield_notes(
+            &self.inner.unspent_notes,
+            total,
+            t_outs,
+            s_outs,
+        )
+        .map_err(js_err)?;
+        Ok(selection.fee)
+    }
+
     /// Build a transparent-to-transparent transaction (v1 P2PKH).
     /// No Sapling params needed.
     #[wasm_bindgen(js_name = sendTransparentToTransparent)]
@@ -721,6 +778,12 @@ pub struct SpentInput {
 #[tsify(from_wasm_abi)]
 pub struct RecipientsInput {
     pub recipients: Vec<crate::transparent::builder::Recipient>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct ShieldRecipientsInput {
+    pub recipients: Vec<crate::sapling::builder::ShieldRecipient>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
