@@ -171,6 +171,14 @@ const shieldSat = wallet.shieldBalanceSat();
 // Build a transparent → transparent tx (no prover required).
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
+// Pay several transparent recipients from one transaction. Recipients are
+// paid in order; any remainder returns to the wallet as change. `amount`
+// is the recipient total, excluding change and fee.
+const split = wallet.sendTransparentToMany({ recipients: [
+  { address: sellerAddress,   amount: 95_000_000n },
+  { address: referrerAddress, amount:  5_000_000n },
+]});
+
 // Build a shield-source tx (load proving params once per session).
 const params = new SaplingParams(outputParamsBytes, spendParamsBytes);
 const shieldTx = wallet.sendShield({

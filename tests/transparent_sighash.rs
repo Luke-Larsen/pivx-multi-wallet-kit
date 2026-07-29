@@ -22,7 +22,10 @@
 
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
-use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction_from_utxos;
+use pivx_wallet_kit::transparent::builder::{
+    Recipient, create_raw_transparent_transaction_from_utxos,
+    create_raw_transparent_transaction_from_utxos_to_many,
+};
 use pivx_wallet_kit::wallet::SerializedUTXO;
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
@@ -441,6 +444,313 @@ fn verifier_rejects_a_redirected_output() {
     assert!(
         panicked,
         "verifier accepted a transaction whose recipient was swapped after signing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-recipient
+// ---------------------------------------------------------------------------
+
+/// Derive `n` distinct transparent addresses to pay.
+fn distinct_addresses(bip39_seed: &[u8], n: u32) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            keys::transparent_key_from_bip39_seed(bip39_seed, 0, 100 + i)
+                .unwrap()
+                .0
+        })
+        .collect()
+}
+
+/// The core multi-recipient assertion: with three recipients plus change, the
+/// signature must commit to all four outputs, and each must carry exactly the
+/// requested amount to exactly the requested address, in the requested order.
+///
+/// This is the case Erik's commission split needs — paying a seller and a
+/// referrer from one transaction — and paying the wrong split is the failure
+/// that costs money.
+#[test]
+fn multi_recipient_signature_commits_to_every_output() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 3);
+    let recipients = vec![
+        Recipient { address: addrs[0].clone(), amount: 30_000_000 },
+        Recipient { address: addrs[1].clone(), amount: 20_000_000 },
+        Recipient { address: addrs[2].clone(), amount: 10_000_000 },
+    ];
+    let utxos = vec![utxo("a", 0, 100_000_000)];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed, 0, 5, &utxos, &recipients,
+    )
+    .expect("multi-recipient build should succeed");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+
+    assert_eq!(tx.version, 1);
+    assert_eq!(tx.outputs.len(), 4, "3 recipients + change");
+
+    // The signature must be valid over all four outputs.
+    assert_eq!(verify_all_signatures(&tx), 1);
+
+    // Recipient order must be preserved, with the right amount at each slot.
+    for (i, r) in recipients.iter().enumerate() {
+        let expected_script = keys::address_to_p2pkh_script(&r.address).unwrap();
+        assert_eq!(
+            tx.outputs[i].script_pubkey, expected_script,
+            "output {i} pays the wrong address — recipient order was not preserved"
+        );
+        assert_eq!(
+            tx.outputs[i].value, r.amount,
+            "output {i} pays the wrong amount"
+        );
+    }
+
+    // Change is last and returns to the source address.
+    let source = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap().0;
+    assert_eq!(
+        tx.outputs[3].script_pubkey,
+        keys::address_to_p2pkh_script(&source).unwrap(),
+        "change must return to the source address"
+    );
+
+    // Reported total is the recipient sum, excluding change and fee.
+    assert_eq!(result.amount, 60_000_000);
+
+    // Value conservation across the whole transaction.
+    let out_total: u64 = tx.outputs.iter().map(|o| o.value).sum();
+    assert_eq!(100_000_000 - out_total, result.fee);
+}
+
+/// Multi-recipient with no change output — exercises a different output count
+/// in both the preimage and the body.
+#[test]
+fn multi_recipient_without_change() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 2);
+    let utxos = vec![utxo("b", 0, 100_000_000)];
+
+    // 2 recipients + assumed change = 3 outputs in the fee model.
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 3);
+    let half = (100_000_000 - fee) / 2;
+    let recipients = vec![
+        Recipient { address: addrs[0].clone(), amount: half },
+        // Absorb the rounding remainder so nothing is left for change.
+        Recipient { address: addrs[1].clone(), amount: 100_000_000 - fee - half },
+    ];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed, 0, 5, &utxos, &recipients,
+    )
+    .expect("build should succeed");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs.len(), 2, "no change output expected");
+    assert_eq!(verify_all_signatures(&tx), 1);
+    assert_eq!(result.amount, 100_000_000 - fee);
+}
+
+/// Many recipients across many inputs — the combination most likely to expose
+/// a varint or offset error, since both counts cross out of single-byte range
+/// behaviour in the same transaction.
+#[test]
+fn multi_recipient_multi_input() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 6);
+    let recipients: Vec<Recipient> = addrs
+        .iter()
+        .enumerate()
+        .map(|(i, a)| Recipient {
+            address: a.clone(),
+            amount: 10_000_000 + (i as u64 * 1_000_000),
+        })
+        .collect();
+
+    let utxos = vec![
+        utxo("a", 0, 50_000_000),
+        utxo("b", 1, 50_000_000),
+        utxo("c", 2, 50_000_000),
+        utxo("d", 3, 50_000_000),
+    ];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed, 0, 5, &utxos, &recipients,
+    )
+    .expect("build should succeed");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+
+    assert_eq!(tx.inputs.len(), 4);
+    assert_eq!(tx.outputs.len(), 7, "6 recipients + change");
+    assert_eq!(verify_all_signatures(&tx), 4);
+
+    for (i, r) in recipients.iter().enumerate() {
+        assert_eq!(tx.outputs[i].value, r.amount, "output {i} amount");
+    }
+    assert_eq!(result.amount, recipients.iter().map(|r| r.amount).sum::<u64>());
+}
+
+/// Tampering with a *middle* output must invalidate the signature. A sighash
+/// that only committed to the first and last outputs — an easy off-by-one when
+/// generalising from the old fixed two-output shape — would pass every
+/// positive test above and fail here.
+#[test]
+fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 3);
+    let recipients = vec![
+        Recipient { address: addrs[0].clone(), amount: 30_000_000 },
+        Recipient { address: addrs[1].clone(), amount: 20_000_000 },
+        Recipient { address: addrs[2].clone(), amount: 10_000_000 },
+    ];
+    let utxos = vec![utxo("c", 0, 100_000_000)];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed, 0, 5, &utxos, &recipients,
+    )
+    .unwrap();
+
+    let mut tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(verify_all_signatures(&tx), 1);
+
+    // Redirect the middle recipient's payment.
+    let attacker = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 99).unwrap().0;
+    tx.outputs[1].script_pubkey = keys::address_to_p2pkh_script(&attacker).unwrap();
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_all_signatures(&tx);
+    }))
+    .is_err();
+
+    assert!(
+        panicked,
+        "signature did not commit to the middle output — a recipient could be swapped without \
+         invalidating the transaction"
+    );
+}
+
+/// Reordering outputs without changing any value must also invalidate. Guards
+/// against a sighash that commits to the output *set* rather than the output
+/// *sequence*.
+#[test]
+fn multi_recipient_verifier_rejects_reordered_outputs() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 2);
+    let recipients = vec![
+        Recipient { address: addrs[0].clone(), amount: 30_000_000 },
+        Recipient { address: addrs[1].clone(), amount: 20_000_000 },
+    ];
+    let utxos = vec![utxo("d", 0, 100_000_000)];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed, 0, 5, &utxos, &recipients,
+    )
+    .unwrap();
+
+    let mut tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(verify_all_signatures(&tx), 1);
+
+    tx.outputs.swap(0, 1);
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_all_signatures(&tx);
+    }))
+    .is_err();
+
+    assert!(panicked, "signature did not commit to output ordering");
+}
+
+/// Single-recipient calls routed through the multi-recipient path must produce
+/// byte-identical transactions to the legacy single-recipient entry point.
+/// This is the backwards-compatibility guarantee for existing consumers.
+#[test]
+fn single_recipient_is_byte_identical_through_both_entry_points() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let utxos = vec![utxo("e", 0, 100_000_000), utxo("f", 1, 50_000_000)];
+
+    let legacy = create_raw_transparent_transaction_from_utxos(
+        &bip39_seed, 0, 5, &utxos, &to, 50_000_000,
+    )
+    .unwrap();
+
+    let via_many = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to.clone(), amount: 50_000_000 }],
+    )
+    .unwrap();
+
+    assert_eq!(
+        legacy.txhex, via_many.txhex,
+        "the multi-recipient path changed single-recipient output — existing callers would see \
+         different transactions"
+    );
+    assert_eq!(legacy.fee, via_many.fee);
+    assert_eq!(legacy.amount, via_many.amount);
+}
+
+/// Input validation. Each of these would otherwise produce a transaction the
+/// network rejects, for reasons hard to trace back to the call site.
+#[test]
+fn multi_recipient_rejects_invalid_input() {
+    let bip39_seed = seed();
+    let addrs = distinct_addresses(&bip39_seed, 1);
+    let utxos = vec![utxo("a", 0, 100_000_000)];
+
+    // Empty recipient list.
+    assert!(
+        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &[])
+            .is_err(),
+        "empty recipient list should be rejected"
+    );
+
+    // Zero-value payment.
+    let zero = vec![Recipient { address: addrs[0].clone(), amount: 0 }];
+    assert!(
+        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &zero)
+            .is_err(),
+        "zero-amount recipient should be rejected"
+    );
+
+    // Amounts that overflow u64 when summed.
+    let overflow = vec![
+        Recipient { address: addrs[0].clone(), amount: u64::MAX },
+        Recipient { address: addrs[0].clone(), amount: 1 },
+    ];
+    assert!(
+        create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed, 0, 5, &utxos, &overflow
+        )
+        .is_err(),
+        "overflowing recipient amounts should be rejected, not wrapped"
+    );
+
+    // Shield destination in a raw transparent send.
+    let shield = vec![Recipient {
+        address: "ps1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+            .to_string(),
+        amount: 10_000_000,
+    }];
+    assert!(
+        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &shield)
+            .is_err(),
+        "shield recipient should be rejected from the raw transparent path"
+    );
+
+    // Insufficient funds across the recipient set.
+    let too_much = vec![
+        Recipient { address: addrs[0].clone(), amount: 60_000_000 },
+        Recipient { address: addrs[0].clone(), amount: 60_000_000 },
+    ];
+    assert!(
+        create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed, 0, 5, &utxos, &too_much
+        )
+        .is_err(),
+        "recipient total exceeding available funds should be rejected"
     );
 }
 

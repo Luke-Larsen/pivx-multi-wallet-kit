@@ -450,6 +450,65 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Build one transparent-to-transparent transaction paying multiple
+    /// recipients (v1 P2PKH). No Sapling params needed.
+    ///
+    /// Recipients are paid in the order given; any remainder returns to the
+    /// wallet's own address as a final change output. `result.amount` is the
+    /// sum paid to recipients, excluding change and fee.
+    ///
+    /// ```js
+    /// const tx = wallet.sendTransparentToMany({ recipients: [
+    ///   { address: sellerAddress,   amount: 95000000n },
+    ///   { address: referrerAddress, amount:  5000000n },
+    /// ]});
+    /// ```
+    ///
+    /// All recipients must be transparent (`D...`) addresses. Shield
+    /// destinations need a Sapling prover and cannot be mixed into this
+    /// transaction — use `sendTransparentToShield` for those.
+    #[wasm_bindgen(js_name = sendTransparentToMany)]
+    pub fn send_transparent_to_many(
+        &mut self,
+        recipients: RecipientsInput,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::builder::create_raw_transparent_transaction_to_many(
+            &mut self.inner,
+            &bip39_seed,
+            &recipients.recipients,
+        )
+        .map_err(js_err)
+    }
+
+    /// Multi-recipient form of `sendTransparentFromUtxos`: spends the
+    /// caller-supplied UTXOs from a specific HD slot across several
+    /// transparent recipients.
+    ///
+    /// Every supplied UTXO is spent — no selection is applied. Pass recipient
+    /// amounts summing to `totalUtxoValue - estimatedFee` to produce a tx with
+    /// no change output.
+    #[wasm_bindgen(js_name = sendTransparentFromUtxosToMany)]
+    pub fn send_transparent_from_utxos_to_many(
+        &self,
+        from_change: u32,
+        from_index: u32,
+        utxos: UtxosInput,
+        recipients: RecipientsInput,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::builder::create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed,
+            from_change,
+            from_index,
+            &utxos.utxos,
+            &recipients.recipients,
+        )
+        .map_err(js_err)
+    }
+
     /// Build a v1 P2PKH transparent tx from a specific HD slot,
     /// spending caller-supplied UTXOs.
     ///
@@ -656,6 +715,12 @@ pub struct UtxosInput {
 #[tsify(from_wasm_abi)]
 pub struct SpentInput {
     pub spent: Vec<SpentOutpoint>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct RecipientsInput {
+    pub recipients: Vec<crate::transparent::builder::Recipient>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
