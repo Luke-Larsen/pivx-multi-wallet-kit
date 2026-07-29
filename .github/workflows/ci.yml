@@ -68,6 +68,33 @@ jobs:
         # WASM target features. Consumers who need threaded WASM set this up
         # in their own build environment.
 
+      # Regression gate for the 0.2.3 hang: rayon reaching the default wasm
+      # artifact means every shield proof spins at 100% CPU forever, because
+      # there are no worker threads for it to wait on. A `cargo build` alone
+      # does NOT catch this — the broken artifact compiles perfectly and only
+      # hangs at runtime, which is how 0.2.3 shipped to npm.
+      #
+      # Checking the built binary rather than `cargo tree` is deliberate:
+      # zcash_client_backend has a hard (non-optional) rayon dependency, so
+      # rayon is always in the dependency graph. It stays out of the artifact
+      # only because its sole caller there (`scan.rs`) is unreachable from
+      # this crate and LTO drops it. The artifact is the thing that ships,
+      # so the artifact is the thing to assert on.
+      - name: Assert wasm artifact is rayon-free
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/pivx_wallet_kit.wasm
+          test -f "$WASM" || { echo "::error::$WASM not found"; exit 1; }
+          COUNT=$(strings "$WASM" | grep -c rayon || true)
+          if [ "$COUNT" -ne 0 ]; then
+            echo "::error::Found $COUNT rayon references in the default wasm artifact."
+            echo "Rayon in a threadless wasm build hangs forever during Groth16 proving."
+            echo "Check that no dependency re-enabled bellman's or sapling's"
+            echo "'multicore' default feature (see the note in Cargo.toml)."
+            strings "$WASM" | grep rayon | sort -u | head -20
+            exit 1
+          fi
+          echo "OK: no rayon references in the default wasm artifact."
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
