@@ -754,6 +754,99 @@ fn multi_recipient_rejects_invalid_input() {
     );
 }
 
+/// The output count crosses from a 1-byte varint to the 3-byte `0xfd` form at
+/// 253. That transition happens independently in the sighash preimage and in
+/// the transaction body, so it is the single most likely place for the two to
+/// disagree — and a disagreement is invisible to any check that does not verify
+/// the signature.
+#[test]
+fn signature_holds_across_the_output_count_varint_boundary() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+
+    // 251/252 recipients => 252/253 outputs with change: either side of the
+    // boundary. Plus a couple beyond it.
+    for n in [251usize, 252, 253, 300] {
+        let utxos = vec![utxo("a", 0, 100_000_000_000)];
+        let recipients: Vec<Recipient> = (0..n)
+            .map(|_| Recipient { address: to.clone(), amount: 1_000_000 })
+            .collect();
+
+        let result = create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed, 0, 5, &utxos, &recipients,
+        )
+        .unwrap_or_else(|e| panic!("{n} recipients failed to build: {e}"));
+
+        let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+        assert_eq!(tx.outputs.len(), n + 1, "{n} recipients + change");
+
+        // The assertion that matters: the signature must still commit to the
+        // whole transaction once the count is length-prefixed differently.
+        assert_eq!(
+            verify_all_signatures(&tx),
+            1,
+            "{n} recipients: signature does not commit to the transaction"
+        );
+
+        assert_eq!(result.amount, n as u64 * 1_000_000);
+        let out_total: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        assert_eq!(100_000_000_000 - out_total, result.fee, "{n}: value not conserved");
+    }
+}
+
+/// Same boundary on the input side: 253 inputs crosses into the 3-byte varint,
+/// and every one of them must still verify against its own preimage position.
+#[test]
+fn signature_holds_across_the_input_count_varint_boundary() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+
+    for n in [252usize, 253, 260] {
+        let utxos: Vec<SerializedUTXO> = (0..n)
+            .map(|i| utxo("b", i as u32, 1_000_000))
+            .collect();
+
+        let result = create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed,
+            0,
+            5,
+            &utxos,
+            &[Recipient { address: to.clone(), amount: 500_000 }],
+        )
+        .unwrap_or_else(|e| panic!("{n} inputs failed to build: {e}"));
+
+        let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+        assert_eq!(tx.inputs.len(), n);
+        assert_eq!(
+            verify_all_signatures(&tx),
+            n,
+            "{n} inputs: at least one signature does not commit to the transaction"
+        );
+    }
+}
+
+/// A single-satoshi output must survive serialization exactly. Network dust
+/// policy is the node's business, but the kit must not silently drop or round it.
+#[test]
+fn dust_output_is_preserved_exactly() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let utxos = vec![utxo("c", 0, 100_000_000)];
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to, amount: 1 }],
+    )
+    .unwrap();
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs[0].value, 1, "1 sat output must round-trip exactly");
+    assert_eq!(verify_all_signatures(&tx), 1);
+}
+
 /// The parser must consume exactly the bytes the builder emitted. Catches
 /// length-prefix drift — a varint written for the wrong count, or a script
 /// length that disagrees with the script that follows.

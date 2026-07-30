@@ -167,6 +167,88 @@ fn rejects_memo_on_a_transparent_recipient() {
     assert!(shield_recipient_fee_shape(&[ok]).is_ok());
 }
 
+/// A Sapling memo field is 512 bytes. Over-long memos must be rejected during
+/// recipient resolution, not deep inside the builder — otherwise the fee
+/// estimator quotes a fee for a send that cannot be built, breaking the
+/// estimator/builder agreement the rest of this module maintains.
+#[test]
+fn rejects_over_long_memo() {
+    let s_addr = shield_address();
+
+    let ok = ShieldRecipient {
+        address: s_addr.clone(),
+        amount: 10_000,
+        memo: "x".repeat(512),
+    };
+    assert!(
+        shield_recipient_fee_shape(&[ok]).is_ok(),
+        "512 bytes is exactly the limit and must be accepted"
+    );
+
+    let too_long = ShieldRecipient {
+        address: s_addr,
+        amount: 10_000,
+        memo: "x".repeat(513),
+    };
+    let err = shield_recipient_fee_shape(&[too_long])
+        .expect_err("513 bytes must be rejected")
+        .to_string();
+    assert!(
+        err.to_lowercase().contains("memo"),
+        "error should name the memo, got: {err}"
+    );
+}
+
+/// The 512-byte limit is on encoded bytes, so a short string of multi-byte
+/// characters can still overflow it. Counting characters instead of bytes would
+/// let this through.
+#[test]
+fn memo_limit_is_measured_in_bytes_not_characters() {
+    let s_addr = shield_address();
+
+    // 200 snowmen = 200 chars but 600 bytes.
+    let multibyte = ShieldRecipient {
+        address: s_addr.clone(),
+        amount: 10_000,
+        memo: "☃".repeat(200),
+    };
+    assert!(
+        shield_recipient_fee_shape(&[multibyte]).is_err(),
+        "600 bytes of multi-byte characters must be rejected despite being 200 chars"
+    );
+
+    // 170 snowmen = 510 bytes, inside the limit.
+    let fits = ShieldRecipient {
+        address: s_addr,
+        amount: 10_000,
+        memo: "☃".repeat(170),
+    };
+    assert!(
+        shield_recipient_fee_shape(&[fits]).is_ok(),
+        "510 bytes of multi-byte characters should fit"
+    );
+}
+
+/// Validation must reach every element, not stop at the first. A long list with
+/// one bad entry at the end is the realistic shape of a caller bug.
+#[test]
+fn validates_every_recipient_in_a_long_list() {
+    let s_addr = shield_address();
+    let mut recipients: Vec<ShieldRecipient> =
+        (0..40).map(|_| shield_recipient(&s_addr, 10_000)).collect();
+
+    recipients.push(ShieldRecipient {
+        address: s_addr,
+        amount: 10_000,
+        memo: "x".repeat(1000),
+    });
+
+    let err = shield_recipient_fee_shape(&recipients)
+        .expect_err("a bad memo at position 40 must be caught")
+        .to_string();
+    assert!(err.to_lowercase().contains("memo"), "got: {err}");
+}
+
 #[test]
 fn rejects_amounts_that_overflow_when_summed() {
     let s_addr = shield_address();

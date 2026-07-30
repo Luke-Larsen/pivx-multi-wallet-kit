@@ -112,8 +112,13 @@ pub struct ShieldRecipient {
 /// Recipients split by destination pool, with the output counts the fee model
 /// needs.
 struct ResolvedShieldOutputs {
-    /// `(address, amount, memo)` in caller order.
-    outputs: Vec<(GenericAddress, u64, String)>,
+    /// `(address, amount, encoded memo)` in caller order.
+    ///
+    /// Memos are encoded here rather than in the builder so that a memo which
+    /// cannot be encoded is rejected at resolution time — which means the fee
+    /// estimator rejects it too, instead of quoting a fee for a send that would
+    /// later fail to build.
+    outputs: Vec<(GenericAddress, u64, MemoBytes)>,
     transparent_outs: u64,
     sapling_outs: u64,
     total_amount: u64,
@@ -149,8 +154,29 @@ fn resolve_shield_recipients(
             .ok_or("Recipient amounts overflow u64")?;
 
         let decoded = keys::decode_generic_address(&r.address)?;
-        match decoded {
-            GenericAddress::Shield(_) => shield_outs += 1,
+        let memo_bytes = match decoded {
+            GenericAddress::Shield(_) => {
+                shield_outs += 1;
+                if r.memo.is_empty() {
+                    MemoBytes::empty()
+                } else {
+                    // Encoding here is the validation: a Sapling memo field is
+                    // 512 bytes, and the limit is on encoded *bytes*, so a
+                    // short string of multi-byte characters can still overflow
+                    // it. Rejecting at resolution keeps the estimator and the
+                    // builder in agreement about what is sendable.
+                    Memo::from_str(&r.memo)
+                        .map_err(|e| {
+                            format!(
+                                "Invalid memo for recipient {} ({} bytes): {}",
+                                r.address,
+                                r.memo.len(),
+                                e
+                            )
+                        })?
+                        .encode()
+                }
+            }
             GenericAddress::Transparent(_) => {
                 if !r.memo.is_empty() {
                     return Err(format!(
@@ -161,9 +187,10 @@ fn resolve_shield_recipients(
                     .into());
                 }
                 transparent_outs += 1;
+                MemoBytes::empty()
             }
-        }
-        outputs.push((decoded, r.amount, r.memo.clone()));
+        };
+        outputs.push((decoded, r.amount, memo_bytes));
     }
 
     debug_assert_eq!(
@@ -327,7 +354,7 @@ pub fn create_shield_transaction_to_many(
         .ok_or("Selected notes do not cover amount plus fee")?;
     let change_amount = Zatoshis::from_u64(change_amount).map_err(|_| "Invalid change")?;
 
-    for (addr, out_amount, memo) in &resolved.outputs {
+    for (addr, out_amount, memo_bytes) in &resolved.outputs {
         let send_amount = Zatoshis::from_u64(*out_amount).map_err(|_| "Invalid amount")?;
         match addr {
             GenericAddress::Transparent(addr) => {
@@ -336,15 +363,16 @@ pub fn create_shield_transaction_to_many(
                     .map_err(|e| format!("Failed to add transparent output: {:?}", e))?;
             }
             GenericAddress::Shield(addr) => {
-                let memo_bytes = if memo.is_empty() {
-                    MemoBytes::empty()
-                } else {
-                    Memo::from_str(memo)
-                        .map_err(|e| format!("Invalid memo: {}", e))?
-                        .encode()
-                };
+                // Memo already validated and encoded by
+                // `resolve_shield_recipients`, so there is nothing here that
+                // can fail differently from what the estimator saw.
                 builder
-                    .add_sapling_output::<FeeRule>(None, *addr, send_amount, memo_bytes)
+                    .add_sapling_output::<FeeRule>(
+                        None,
+                        *addr,
+                        send_amount,
+                        memo_bytes.clone(),
+                    )
                     .map_err(|_| "Failed to add sapling output")?;
             }
         }
