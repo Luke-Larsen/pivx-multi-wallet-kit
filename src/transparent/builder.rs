@@ -38,7 +38,7 @@ pub struct SpentOutpoint {
 }
 
 /// Result of building a transparent transaction.
-#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct TransparentTransactionResult {
     pub txhex: String,
@@ -136,6 +136,138 @@ fn total_recipient_amount(recipients: &[Recipient]) -> Result<u64, Box<dyn Error
         .ok_or_else(|| "Recipient amounts overflow u64".into())
 }
 
+/// Reject a UTXO set containing the same outpoint more than once.
+///
+/// An outpoint can only be spent once. A set containing a duplicate makes the
+/// wallet believe it holds twice the funds it does, and produces a transaction
+/// that spends one output twice — which the network rejects outright.
+///
+/// [`crate::wallet::parse_blockbook_utxos`] already collapses duplicates,
+/// because explorers really do emit them mid-confirmation. This guard covers
+/// the paths that bypass the parser: `sendTransparentFromUtxos*`, where the
+/// caller hands in an exact set, and any `setUtxos` call built by other means.
+///
+/// Erroring rather than silently deduplicating is deliberate here. When a
+/// caller supplies the set explicitly, a duplicate means their own accounting
+/// is wrong — they have almost certainly computed recipient amounts against the
+/// doubled total. Quietly halving their inputs would build a transaction that
+/// does not match what they asked for.
+/// A UTXO selection plus the fee and recipient total it implies.
+struct TransparentSelection {
+    selected: Vec<SerializedUTXO>,
+    /// Sum of the selected UTXOs.
+    total: u64,
+    fee: u64,
+    /// Sum paid to recipients, excluding change and fee.
+    amount: u64,
+}
+
+/// Validate recipients and select UTXOs largest-first until they cover the
+/// recipient total plus fee.
+///
+/// Shared by [`create_raw_transparent_transaction_to_many`] and
+/// [`estimate_raw_transparent_fee_to_many`], because the fee depends on how
+/// many inputs selection ends up reaching for — so an estimator that did its
+/// own selection could quote a different fee than the builder charges.
+fn select_transparent_utxos(
+    wallet: &WalletData,
+    recipients: &[Recipient],
+) -> Result<TransparentSelection, Box<dyn Error>> {
+    if recipients.is_empty() {
+        return Err("No recipients provided".into());
+    }
+    for r in recipients {
+        if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+            return Err(format!(
+                "Shield recipient {} is not supported in a multi-recipient transparent send — \
+                 use create_shielding_transaction for shield destinations",
+                r.address
+            )
+            .into());
+        }
+        if r.amount == 0 {
+            return Err(format!("Recipient {} has a zero amount", r.address).into());
+        }
+        // Reject an unusable address before doing any selection work, so the
+        // estimator and the builder fail on the same input for the same reason.
+        keys::address_to_p2pkh_script(&r.address)?;
+    }
+
+    let amount = total_recipient_amount(recipients)?;
+
+    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
+    let mut utxos = wallet.unspent_utxos.clone();
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    if utxos.is_empty() {
+        return Err("No transparent UTXOs available".into());
+    }
+
+    // Output count for the fee model: recipients plus a possible change
+    // output. Assuming change up front can only over-estimate the fee, which
+    // is the safe direction — under-estimating strands the tx unconfirmed.
+    let fee_output_count = recipients.len() + 1;
+
+    let mut selected: Vec<SerializedUTXO> = Vec::new();
+    let mut total: u64 = 0;
+
+    for utxo in &utxos {
+        selected.push(utxo.clone());
+        // checked_add: see the matching guard in
+        // create_shielding_transaction — UTXOs come from explorers,
+        // not internal code, so we can't trust their values to fit.
+        total = total
+            .checked_add(utxo.amount)
+            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
+        let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
+        if total >= amount.saturating_add(fee) {
+            break;
+        }
+    }
+
+    let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
+    let needed = amount
+        .checked_add(fee)
+        .ok_or("Amount plus fee overflows u64")?;
+    if total < needed {
+        return Err(format!(
+            "Insufficient public balance. Have: {} sat, need: {} sat + {} sat fee",
+            total, amount, fee
+        )
+        .into());
+    }
+
+    Ok(TransparentSelection { selected, total, fee, amount })
+}
+
+/// Fee that [`create_raw_transparent_transaction_to_many`] will charge for
+/// `recipients` against the wallet's current UTXO set.
+///
+/// Errs for the same reasons the builder would — no recipients, a zero amount,
+/// an invalid or shield address, duplicate outpoints, or insufficient funds —
+/// so a successful estimate means the send itself will get as far as signing.
+pub fn estimate_raw_transparent_fee_to_many(
+    wallet: &WalletData,
+    recipients: &[Recipient],
+) -> Result<u64, Box<dyn Error>> {
+    Ok(select_transparent_utxos(wallet, recipients)?.fee)
+}
+
+fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
+    for (i, u) in utxos.iter().enumerate() {
+        if utxos[..i]
+            .iter()
+            .any(|prev| prev.vout == u.vout && prev.txid == u.txid)
+        {
+            return Err(format!(
+                "Duplicate UTXO {}:{} in the input set — an outpoint cannot be spent twice",
+                u.txid, u.vout
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Build and sign a shielding transaction: transparent inputs → shield output(s).
 ///
 /// This is the only path through the v3 builder — pure transparent→transparent
@@ -181,6 +313,7 @@ pub fn create_shielding_transaction(
         _ => return Err("Own address is not transparent".into()),
     };
 
+    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
     let mut utxos = wallet.unspent_utxos.clone();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
@@ -365,64 +498,14 @@ pub fn create_raw_transparent_transaction_to_many(
     bip39_seed: &[u8],
     recipients: &[Recipient],
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
-    for r in recipients {
-        if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
-            return Err(format!(
-                "Shield recipient {} is not supported in a multi-recipient transparent send — \
-                 use create_shielding_transaction for shield destinations",
-                r.address
-            )
-            .into());
-        }
-    }
-
-    let amount = total_recipient_amount(recipients)?;
-
     let (own_address, pubkey_bytes, privkey_bytes) =
         keys::transparent_key_from_bip39_seed(bip39_seed, 0, 0)?;
     let own_script = keys::address_to_p2pkh_script(&own_address)?;
 
-    let mut utxos = wallet.unspent_utxos.clone();
-    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
-    if utxos.is_empty() {
-        return Err("No transparent UTXOs available".into());
-    }
+    let selection = select_transparent_utxos(wallet, recipients)?;
+    let (selected, amount, fee) = (selection.selected, selection.amount, selection.fee);
 
-    // Output count for the fee model: recipients plus a possible change
-    // output. Assuming change up front can only over-estimate the fee, which
-    // is the safe direction — under-estimating strands the tx unconfirmed.
-    let fee_output_count = recipients.len() + 1;
-
-    let mut selected: Vec<SerializedUTXO> = Vec::new();
-    let mut total: u64 = 0;
-
-    for utxo in &utxos {
-        selected.push(utxo.clone());
-        // checked_add: see the matching guard in
-        // create_shielding_transaction — UTXOs come from explorers,
-        // not internal code, so we can't trust their values to fit.
-        total = total
-            .checked_add(utxo.amount)
-            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
-        let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
-        if total >= amount.saturating_add(fee) {
-            break;
-        }
-    }
-
-    let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
-    let needed = amount
-        .checked_add(fee)
-        .ok_or("Amount plus fee overflows u64")?;
-    if total < needed {
-        return Err(format!(
-            "Insufficient public balance. Have: {} sat, need: {} sat + {} sat fee",
-            total, amount, fee
-        )
-        .into());
-    }
-
-    let change = total - needed;
+    let change = selection.total - amount - fee;
     let outputs = resolve_outputs(recipients, change, &own_script)?;
     let txhex = sign_and_serialize(
         &selected,
@@ -513,6 +596,9 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     if utxos.is_empty() {
         return Err("No UTXOs provided".into());
     }
+    // Every supplied UTXO is spent, so a repeated outpoint here would go
+    // straight into the transaction as a double-spend.
+    reject_duplicate_outpoints(utxos)?;
 
     for r in recipients {
         if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {

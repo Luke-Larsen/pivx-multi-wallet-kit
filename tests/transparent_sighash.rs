@@ -847,6 +847,56 @@ fn dust_output_is_preserved_exactly() {
     assert_eq!(verify_all_signatures(&tx), 1);
 }
 
+/// A repeated outpoint must be refused. `parse_blockbook_utxos` collapses
+/// duplicates, but the from-UTXOs builders bypass the parser entirely — the
+/// caller hands in an exact set and every one of them is spent. Pre-fix this
+/// built a transaction spending one output twice while claiming double its
+/// value.
+#[test]
+fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+
+    let duplicated = vec![utxo("a", 0, 100_000_000), utxo("a", 0, 100_000_000)];
+    let err = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &duplicated,
+        &[Recipient { address: to.clone(), amount: 150_000_000 }],
+    )
+    .expect_err("a repeated outpoint must be rejected")
+    .to_string();
+    assert!(
+        err.contains("Duplicate UTXO"),
+        "error should name the duplicate, got: {err}"
+    );
+
+    // Same txid but different vouts are distinct outpoints and must be allowed.
+    let distinct = vec![utxo("a", 0, 100_000_000), utxo("a", 1, 100_000_000)];
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &distinct,
+        &[Recipient { address: to, amount: 150_000_000 }],
+    )
+    .expect("distinct vouts of one txid must be spendable together");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.inputs.len(), 2);
+    assert_eq!(verify_all_signatures(&tx), 2);
+
+    // And no outpoint appears twice in what was actually built.
+    let mut seen = std::collections::HashSet::new();
+    for i in &tx.inputs {
+        assert!(
+            seen.insert((i.prev_txid, i.prev_vout)),
+            "the same outpoint was serialized twice"
+        );
+    }
+}
+
 /// The parser must consume exactly the bytes the builder emitted. Catches
 /// length-prefix drift — a varint written for the wrong count, or a script
 /// length that disagrees with the script that follows.

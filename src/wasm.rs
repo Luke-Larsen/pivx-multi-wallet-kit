@@ -355,31 +355,11 @@ impl Wallet {
         &mut self,
         blocks: ShieldBlocksInput,
     ) -> Result<HandleBlocksResult, JsError> {
-        // Clone instead of mem::take: if handle_blocks errors, we
-        // do not want to strand the wallet with an empty note set.
-        // The H6 zero-clone path is preserved for native consumers
-        // that can hand handle_blocks an owned Vec directly; the
-        // wasm wrapper accepts the per-note allocation cost in
-        // exchange for state-corruption safety.
-        let existing = self.inner.unspent_notes.clone();
-        let result = crate::sapling::sync::handle_blocks(
-            &self.inner.commitment_tree,
-            blocks.blocks,
-            &self.inner.extfvk,
-            existing,
-        )
-        .map_err(js_err)?;
-        // `updated_notes` is the post-batch state of existing notes
-        // (witnesses advanced); `new_notes` is what was newly
-        // discovered. handle_blocks does not filter out own notes
-        // that were spent — the nullifier list contains every spend
-        // in the batch, not just ours, so we let
-        // finalize_transaction do the matching.
-        self.inner.commitment_tree = result.commitment_tree.clone();
-        self.inner.unspent_notes = result.updated_notes.clone();
-        self.inner.unspent_notes.extend(result.new_notes.clone());
-        self.inner.finalize_transaction(&result.nullifiers);
-        Ok(result)
+        // Skips blocks at or below `lastBlock()` and advances the cursor, so
+        // re-applying a range is a no-op rather than a silent corruption of
+        // every witness position. See `apply_blocks_to_wallet`.
+        crate::sapling::sync::apply_blocks_to_wallet(&mut self.inner, blocks.blocks)
+            .map_err(js_err)
     }
 
     /// Replace the transparent UTXO set. Typical pattern: explorer →
@@ -534,6 +514,28 @@ impl Wallet {
         crate::transparent::builder::create_raw_transparent_transaction_to_many(
             &mut self.inner,
             &bip39_seed,
+            &recipients.recipients,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee for `sendTransparentToMany` against the current UTXO set.
+    ///
+    /// Counterpart to `estimateSendShieldFeeToMany`. Runs the same selection
+    /// and the same fee model the builder will, so the returned fee is what
+    /// `sendTransparentToMany` charges for the same recipient list — including
+    /// the fact that the fee grows with the number of inputs selection has to
+    /// reach for.
+    ///
+    /// Errs for the same reasons the builder would: no recipients, a zero
+    /// amount, an invalid or shield address, or insufficient funds.
+    #[wasm_bindgen(js_name = estimateSendTransparentFeeToMany)]
+    pub fn estimate_send_transparent_fee_to_many(
+        &self,
+        recipients: RecipientsInput,
+    ) -> Result<u64, JsError> {
+        crate::transparent::builder::estimate_raw_transparent_fee_to_many(
+            &self.inner,
             &recipients.recipients,
         )
         .map_err(js_err)
