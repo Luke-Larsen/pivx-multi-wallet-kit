@@ -27,9 +27,25 @@
 //! `D...`). The offsets here follow Core's `MatchPayToColdStaking`, which is
 //! unambiguous.
 
+use crate::fees;
 use crate::keys;
 use crate::params::{PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
+use crate::transparent::builder::{
+    SpentOutpoint, TransparentTransactionResult, TxOutput, reject_duplicate_outpoints,
+    sign_and_serialize,
+};
+use crate::wallet::{SerializedUTXO, WalletData};
 use std::error::Error;
+
+/// Smallest delegation the reference wallets will create: 1 PIV.
+///
+/// Defined as `MIN_COLDSTAKING_AMOUNT` in PIVX Core's `consensus/consensus.h`,
+/// but note that despite living in that header it is **not** enforced by
+/// `validation.cpp` or `policy.cpp` — it is a wallet-level rule. Core's
+/// `delegatestake` RPC rejects smaller amounts, and MyPIVXWallet refuses them
+/// too. This crate follows both rather than emitting delegations the reference
+/// implementations would not.
+pub const MIN_COLDSTAKING_AMOUNT: u64 = 100_000_000;
 
 // Opcodes, from PIVX Core `src/script/script.h`.
 const OP_DUP: u8 = 0x76;
@@ -315,4 +331,140 @@ pub fn owner_hash_from_seed(
     let (address, _pubkey, _priv) =
         keys::transparent_key_from_bip39_seed(bip39_seed, change, index)?;
     decode_owner_address(&address)
+}
+
+/// Build and sign a delegation: transparent inputs → one P2CS output.
+///
+/// Delegates `amount` to `staking_address`, retaining spending authority at the
+/// wallet's own transparent address (HD `0/0`) so the delegation can be
+/// withdrawn later. Any remainder returns there as a plain P2PKH change output.
+///
+/// The output is a normal transaction output with an unusual script, so this
+/// goes through the same [`sign_and_serialize`] path as every other transparent
+/// send — the signed preimage and the emitted body are produced from one
+/// `TxOutput` slice by one function, exactly as for a P2PKH send.
+///
+/// `TransparentTransactionResult::amount` is the delegated amount, excluding
+/// change and fee.
+pub fn create_delegation_transaction(
+    wallet: &mut WalletData,
+    bip39_seed: &[u8],
+    staking_address: &str,
+    amount: u64,
+    variant: ColdStakeVariant,
+) -> Result<TransparentTransactionResult, Box<dyn Error>> {
+    let selection = select_for_delegation(wallet, staking_address, amount)?;
+
+    let (own_address, pubkey_bytes, privkey_bytes) =
+        keys::transparent_key_from_bip39_seed(bip39_seed, 0, 0)?;
+    let owner = decode_owner_address(&own_address)?;
+    let staker = decode_staking_address(staking_address)?;
+    let own_script = p2pkh_script_from_hash(&owner);
+
+    let mut outputs = vec![TxOutput {
+        value: amount,
+        script: build_p2cs_script(&staker, &owner, variant),
+    }];
+    let change = selection.total - amount - selection.fee;
+    if change > 0 {
+        outputs.push(TxOutput { value: change, script: own_script.clone() });
+    }
+
+    let txhex = sign_and_serialize(
+        &selection.selected,
+        &outputs,
+        &own_script,
+        &pubkey_bytes,
+        &privkey_bytes,
+    )?;
+
+    let spent: Vec<SpentOutpoint> = selection
+        .selected
+        .iter()
+        .map(|u| SpentOutpoint { txid: u.txid.clone(), vout: u.vout })
+        .collect();
+
+    Ok(TransparentTransactionResult { txhex, spent, amount, fee: selection.fee })
+}
+
+/// Fee [`create_delegation_transaction`] will charge for the same inputs.
+///
+/// Runs the identical selection, so a successful quote means the delegation
+/// itself will get as far as signing.
+pub fn estimate_delegation_fee(
+    wallet: &WalletData,
+    staking_address: &str,
+    amount: u64,
+) -> Result<u64, Box<dyn Error>> {
+    Ok(select_for_delegation(wallet, staking_address, amount)?.fee)
+}
+
+struct DelegationSelection {
+    selected: Vec<SerializedUTXO>,
+    total: u64,
+    fee: u64,
+}
+
+/// Validate the delegation and select UTXOs to cover it.
+///
+/// Shared by the builder and the estimator so the two cannot quote different
+/// fees — the fee depends on how many inputs selection reaches for.
+fn select_for_delegation(
+    wallet: &WalletData,
+    staking_address: &str,
+    amount: u64,
+) -> Result<DelegationSelection, Box<dyn Error>> {
+    // Validate the staking address before any selection work, so a typo fails
+    // for the reason it actually is rather than as "insufficient funds".
+    decode_staking_address(staking_address)?;
+
+    if amount < MIN_COLDSTAKING_AMOUNT {
+        return Err(format!(
+            "Delegation of {amount} sat is below the {MIN_COLDSTAKING_AMOUNT} sat minimum \
+             (1 PIV) that PIVX Core and MyPIVXWallet both enforce"
+        )
+        .into());
+    }
+
+    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
+    let mut utxos = wallet.unspent_utxos.clone();
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    if utxos.is_empty() {
+        return Err("No transparent UTXOs available".into());
+    }
+
+    // One P2CS output plus a possible change output. The P2CS script is 51
+    // bytes against the fee model's flat 25-byte assumption, so the difference
+    // is declared rather than silently under-paid.
+    let fee_for = |input_count: usize| {
+        fees::estimate_raw_transparent_fee_with_extra(
+            input_count,
+            2,
+            fees::P2CS_OUTPUT_EXTRA_BYTES,
+        )
+    };
+
+    let mut selected: Vec<SerializedUTXO> = Vec::new();
+    let mut total: u64 = 0;
+    for utxo in &utxos {
+        selected.push(utxo.clone());
+        total = total
+            .checked_add(utxo.amount)
+            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
+        if total >= amount.saturating_add(fee_for(selected.len())) {
+            break;
+        }
+    }
+
+    let fee = fee_for(selected.len());
+    let needed = amount.checked_add(fee).ok_or("Amount plus fee overflows u64")?;
+    if total < needed {
+        return Err(format!(
+            "Insufficient public balance for delegation. Have: {total} sat, need: {amount} sat \
+             + {fee} sat fee"
+        )
+        .into());
+    }
+
+    Ok(DelegationSelection { selected, total, fee })
 }

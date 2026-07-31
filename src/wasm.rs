@@ -460,6 +460,85 @@ impl Wallet {
         Ok(selection.fee)
     }
 
+    /// Delegate transparent funds for cold staking.
+    ///
+    /// Produces one pay-to-cold-staking output: `stakingAddress` (an `S...`
+    /// address) may stake the coins but never move them, while this wallet's own
+    /// transparent address keeps spending authority, so the delegation can be
+    /// withdrawn later. Any remainder returns here as change.
+    ///
+    /// The minimum is 1 PIV (100000000 sat), matching PIVX Core's
+    /// `delegatestake` RPC and MyPIVXWallet.
+    ///
+    /// ```js
+    /// const tx = wallet.delegateColdStake(stakingAddress, 200000000n);
+    /// ```
+    #[wasm_bindgen(js_name = delegateColdStake)]
+    pub fn delegate_cold_stake(
+        &mut self,
+        staking_address: &str,
+        amount_sat: u64,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::coldstake::create_delegation_transaction(
+            &mut self.inner,
+            &bip39_seed,
+            staking_address,
+            amount_sat,
+            // LOF is the form the network uses: Core selects on UPGRADE_V6_0
+            // activation, which is unset on every network, so Core itself emits
+            // LOF today and every observed mainnet delegation is LOF.
+            crate::transparent::coldstake::ColdStakeVariant::Lof,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee `delegateColdStake` will charge for the same delegation.
+    ///
+    /// Runs the same selection as the builder, so the quote cannot disagree with
+    /// what is actually charged.
+    #[wasm_bindgen(js_name = estimateDelegateColdStakeFee)]
+    pub fn estimate_delegate_cold_stake_fee(
+        &self,
+        staking_address: &str,
+        amount_sat: u64,
+    ) -> Result<u64, JsError> {
+        crate::transparent::coldstake::estimate_delegation_fee(
+            &self.inner,
+            staking_address,
+            amount_sat,
+        )
+        .map_err(js_err)
+    }
+
+    /// Whether a `scriptPubKey` (hex) is a pay-to-cold-staking output, and if so
+    /// which addresses it names.
+    ///
+    /// Lets a consumer identify delegated outputs in its own UTXO set without
+    /// reimplementing the script layout. `stakingAddress` and `ownerAddress` are
+    /// only populated when `isColdStake` is true.
+    #[wasm_bindgen(js_name = inspectColdStakeScript)]
+    pub fn inspect_cold_stake_script(script_hex: &str) -> Result<ColdStakeInfo, JsError> {
+        use crate::transparent::coldstake as cs;
+        let script = crate::simd::hex::hex_string_to_bytes(script_hex);
+        if !cs::is_p2cs(&script) {
+            return Ok(ColdStakeInfo {
+                is_cold_stake: false,
+                is_lof: false,
+                staking_address: None,
+                owner_address: None,
+            });
+        }
+        let (staking, owner) = cs::addresses_from_p2cs_script(&script).map_err(js_err)?;
+        Ok(ColdStakeInfo {
+            is_cold_stake: true,
+            is_lof: cs::is_p2cs_lof(&script),
+            staking_address: Some(staking),
+            owner_address: Some(owner),
+        })
+    }
+
     /// Build a transparent-to-transparent transaction (v1 P2PKH).
     /// No Sapling params needed.
     #[wasm_bindgen(js_name = sendTransparentToTransparent)]
@@ -786,6 +865,25 @@ pub struct RecipientsInput {
 #[tsify(from_wasm_abi)]
 pub struct ShieldRecipientsInput {
     pub recipients: Vec<crate::sapling::builder::ShieldRecipient>,
+}
+
+/// What `inspectColdStakeScript` reports about a `scriptPubKey`.
+///
+/// A plain struct rather than a serialized `serde_json::Value`: serde-wasm-bindgen
+/// renders a JSON object as a JS `Map`, whose fields are not reachable as
+/// properties, so `info.isColdStake` would silently read `undefined`.
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ColdStakeInfo {
+    pub is_cold_stake: bool,
+    /// True when the script uses `OP_CHECKCOLDSTAKEVERIFY_LOF`, the form the
+    /// network currently uses.
+    pub is_lof: bool,
+    /// The `S...` address permitted to stake, when this is a P2CS output.
+    pub staking_address: Option<String>,
+    /// The `D...` address permitted to spend, when this is a P2CS output.
+    pub owner_address: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]

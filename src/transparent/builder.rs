@@ -70,9 +70,9 @@ pub struct Recipient {
 /// apart — which was a live hazard while the output shape was open-coded
 /// separately in `compute_sighash` and in each builder's writer.
 #[derive(Clone, Debug)]
-struct TxOutput {
-    value: u64,
-    script: Vec<u8>,
+pub(crate) struct TxOutput {
+    pub(crate) value: u64,
+    pub(crate) script: Vec<u8>,
 }
 
 /// Serialize an output list in consensus form: count, then `value ||
@@ -80,7 +80,7 @@ struct TxOutput {
 ///
 /// Single source of truth for output bytes — used by both the sighash
 /// preimage and the final transaction body. Do not inline this.
-fn write_outputs(buf: &mut Vec<u8>, outputs: &[TxOutput]) {
+pub(crate) fn write_outputs(buf: &mut Vec<u8>, outputs: &[TxOutput]) {
     write_varint(buf, outputs.len() as u64);
     for out in outputs {
         buf.extend_from_slice(&out.value.to_le_bytes());
@@ -136,22 +136,6 @@ fn total_recipient_amount(recipients: &[Recipient]) -> Result<u64, Box<dyn Error
         .ok_or_else(|| "Recipient amounts overflow u64".into())
 }
 
-/// Reject a UTXO set containing the same outpoint more than once.
-///
-/// An outpoint can only be spent once. A set containing a duplicate makes the
-/// wallet believe it holds twice the funds it does, and produces a transaction
-/// that spends one output twice — which the network rejects outright.
-///
-/// [`crate::wallet::parse_blockbook_utxos`] already collapses duplicates,
-/// because explorers really do emit them mid-confirmation. This guard covers
-/// the paths that bypass the parser: `sendTransparentFromUtxos*`, where the
-/// caller hands in an exact set, and any `setUtxos` call built by other means.
-///
-/// Erroring rather than silently deduplicating is deliberate here. When a
-/// caller supplies the set explicitly, a duplicate means their own accounting
-/// is wrong — they have almost certainly computed recipient amounts against the
-/// doubled total. Quietly halving their inputs would build a transaction that
-/// does not match what they asked for.
 /// A UTXO selection plus the fee and recipient total it implies.
 struct TransparentSelection {
     selected: Vec<SerializedUTXO>,
@@ -252,7 +236,23 @@ pub fn estimate_raw_transparent_fee_to_many(
     Ok(select_transparent_utxos(wallet, recipients)?.fee)
 }
 
-fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
+/// Reject a UTXO set containing the same outpoint more than once.
+///
+/// An outpoint can only be spent once. A set containing a duplicate makes the
+/// wallet believe it holds twice the funds it does, and produces a transaction
+/// that spends one output twice — which the network rejects outright.
+///
+/// [`crate::wallet::parse_blockbook_utxos`] already collapses duplicates,
+/// because explorers really do emit them mid-confirmation. This guard covers
+/// the paths that bypass the parser: `sendTransparentFromUtxos*`, where the
+/// caller hands in an exact set, and any `setUtxos` call built by other means.
+///
+/// Erroring rather than silently deduplicating is deliberate here. When a
+/// caller supplies the set explicitly, a duplicate means their own accounting
+/// is wrong — they have almost certainly computed recipient amounts against the
+/// doubled total. Quietly halving their inputs would build a transaction that
+/// does not match what they asked for.
+pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
     for (i, u) in utxos.iter().enumerate() {
         if utxos[..i]
             .iter()
@@ -712,7 +712,7 @@ fn compute_sighash(
 /// UTXOs and recipients, not in how a signed transaction is laid out. Keeping
 /// the signing loop in one place means the sighash and the serialized body are
 /// always produced from the same `outputs` slice.
-fn sign_and_serialize(
+pub(crate) fn sign_and_serialize(
     selected: &[SerializedUTXO],
     outputs: &[TxOutput],
     own_script: &[u8],
