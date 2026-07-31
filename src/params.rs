@@ -9,6 +9,14 @@ pub const PIVX_COIN_TYPE: u32 = 119;
 /// Base58Check version byte for PIVX transparent pubkey addresses (produces `D...`).
 pub const PIVX_PUBKEY_PREFIX: u8 = 30;
 
+/// Base58Check version byte for PIVX cold-staking addresses (produces `S...`).
+///
+/// A staking address encodes the hash of the key permitted to *stake* a
+/// delegated output, never to spend it. Verified against PIVX Core
+/// (`chainparams.cpp`, mainnet `base58Prefixes[STAKING_ADDRESS]`) and
+/// MyPIVXWallet (`chain_params.json`, `main.STAKING_ADDRESS`).
+pub const PIVX_STAKING_PREFIX: u8 = 63;
+
 /// Expected SHA256 of the Sapling output parameters (Groth16 proving key).
 pub const OUTPUT_PARAMS_SHA256: &str =
     "2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4";
