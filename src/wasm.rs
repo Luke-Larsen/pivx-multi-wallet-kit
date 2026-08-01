@@ -302,6 +302,19 @@ impl Wallet {
         self.inner.get_balance()
     }
 
+    /// Balance held in cold-staking delegations, redeemable via
+    /// `withdrawColdStake` rather than an ordinary send.
+    ///
+    /// Only counts UTXOs whose `script` is populated and parses as P2CS.
+    /// Blockbook's UTXO endpoint omits scripts, and `parseBlockbookUtxos` leaves
+    /// the field empty — so a consumer using cold staking must populate `script`
+    /// for delegated outputs, or they will be counted as spendable and selected
+    /// by ordinary sends, which the network then rejects.
+    #[wasm_bindgen(js_name = delegatedBalanceSat)]
+    pub fn delegated_balance_sat(&self) -> u64 {
+        self.inner.get_delegated_balance()
+    }
+
     #[wasm_bindgen(js_name = transparentBalanceSat)]
     pub fn transparent_balance_sat(&self) -> u64 {
         self.inner.get_transparent_balance()
@@ -510,6 +523,33 @@ impl Wallet {
             amount_sat,
         )
         .map_err(js_err)
+    }
+
+    /// This wallet's own staking (`S...`) address.
+    ///
+    /// The same key as `transparentAddress()`, rendered under the staking
+    /// version byte. Delegating to this address is self-staking: the coins stay
+    /// under this wallet's control for both staking and spending.
+    ///
+    /// To delegate to someone else's node, use *their* `S...` address instead.
+    #[wasm_bindgen(js_name = stakingAddress)]
+    pub fn staking_address(&self) -> Result<String, JsError> {
+        self.staking_address_at(0, 0)
+    }
+
+    /// The staking (`S...`) address for a specific HD slot,
+    /// `m/44'/119'/0'/change/index`.
+    ///
+    /// Counterpart to the `fromChange` / `fromIndex` arguments of
+    /// `withdrawColdStake`, for consumers that keep delegations across several
+    /// slots.
+    #[wasm_bindgen(js_name = stakingAddressAt)]
+    pub fn staking_address_at(&self, change: u32, index: u32) -> Result<String, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        let hash = crate::transparent::coldstake::owner_hash_from_seed(&bip39_seed, change, index)
+            .map_err(js_err)?;
+        Ok(crate::transparent::coldstake::encode_staking_address(&hash))
     }
 
     /// Withdraw delegated coins, ending a cold-staking delegation.

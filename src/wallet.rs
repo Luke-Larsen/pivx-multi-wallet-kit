@@ -50,6 +50,20 @@ pub struct SerializedUTXO {
 /// `script` is left empty because Blockbook doesn't always include scripts
 /// and consumers that need them can reconstruct P2PKH from the spending
 /// wallet's address.
+/// Whether a UTXO is a cold-staking delegation rather than an ordinary output.
+///
+/// Requires the `script` field: a P2CS output is recognisable only from its
+/// script, and nothing else about the UTXO distinguishes it. An empty script
+/// means "unknown", and unknown is treated as ordinary — which is the direction
+/// that preserves existing behaviour, at the cost of the hazard documented on
+/// [`WalletData::get_transparent_balance`].
+pub fn is_delegated_utxo(utxo: &SerializedUTXO) -> bool {
+    if utxo.script.is_empty() {
+        return false;
+    }
+    crate::transparent::coldstake::is_p2cs(&crate::simd::hex::hex_string_to_bytes(&utxo.script))
+}
+
 pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
     let mut utxos: Vec<SerializedUTXO> = Vec::new();
     for u in raw {
@@ -177,8 +191,39 @@ impl WalletData {
 
     /// Sum of all transparent UTXO values, in satoshis.
     #[inline]
+    /// Spendable transparent balance, excluding anything delegated for cold
+    /// staking.
+    ///
+    /// A delegated output still belongs to this wallet — the owner key can
+    /// redeem it — but it cannot be spent by an ordinary P2PKH transaction, so
+    /// counting it here would report funds that no plain send can reach. Use
+    /// [`WalletData::get_delegated_balance`] for the other half, and
+    /// `withdrawColdStake` to move it.
+    ///
+    /// Detection needs each UTXO's `script`. Explorers do not always supply one
+    /// — Blockbook's UTXO endpoint omits it — and
+    /// [`parse_blockbook_utxos`] leaves the field empty, in which case a
+    /// delegated output is indistinguishable from an ordinary one and is
+    /// counted here. Consumers that use cold staking should populate `script`.
     pub fn get_transparent_balance(&self) -> u64 {
-        self.unspent_utxos.iter().map(|u| u.amount).sum()
+        self.unspent_utxos
+            .iter()
+            .filter(|u| !is_delegated_utxo(u))
+            .map(|u| u.amount)
+            .sum()
+    }
+
+    /// Balance held in cold-staking delegations, redeemable via
+    /// `withdrawColdStake` rather than an ordinary send.
+    ///
+    /// Only counts UTXOs whose `script` is populated and parses as P2CS; see
+    /// the note on [`WalletData::get_transparent_balance`].
+    pub fn get_delegated_balance(&self) -> u64 {
+        self.unspent_utxos
+            .iter()
+            .filter(|u| is_delegated_utxo(u))
+            .map(|u| u.amount)
+            .sum()
     }
 
     /// Get the default transparent address (derived from the mnemonic).

@@ -534,10 +534,17 @@ fn select_for_delegation(
     }
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
-    let mut utxos = wallet.unspent_utxos.clone();
+    // A delegation is funded from ordinary outputs. Already-delegated ones are
+    // P2CS and cannot be re-delegated without first being withdrawn.
+    let mut utxos: Vec<SerializedUTXO> = wallet
+        .unspent_utxos
+        .iter()
+        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .cloned()
+        .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
-        return Err("No transparent UTXOs available".into());
+        return Err("No spendable transparent UTXOs available to fund a delegation".into());
     }
 
     // One P2CS output plus a possible change output. The P2CS script is 51

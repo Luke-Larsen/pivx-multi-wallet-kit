@@ -180,9 +180,24 @@ fn select_transparent_utxos(
     let amount = total_recipient_amount(recipients)?;
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
-    let mut utxos = wallet.unspent_utxos.clone();
+    // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
+    // here would produce a transaction the network rejects. They remain
+    // redeemable via `create_coldstake_withdrawal`.
+    let mut utxos: Vec<SerializedUTXO> = wallet
+        .unspent_utxos
+        .iter()
+        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .cloned()
+        .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
+        let delegated = wallet.get_delegated_balance();
+        if delegated > 0 {
+            return Err(format!(
+                "No spendable transparent UTXOs — {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+            )
+            .into());
+        }
         return Err("No transparent UTXOs available".into());
     }
 
@@ -314,9 +329,24 @@ pub fn create_shielding_transaction(
     };
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
-    let mut utxos = wallet.unspent_utxos.clone();
+    // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
+    // here would produce a transaction the network rejects. They remain
+    // redeemable via `create_coldstake_withdrawal`.
+    let mut utxos: Vec<SerializedUTXO> = wallet
+        .unspent_utxos
+        .iter()
+        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .cloned()
+        .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
+        let delegated = wallet.get_delegated_balance();
+        if delegated > 0 {
+            return Err(format!(
+                "No spendable transparent UTXOs — {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+            )
+            .into());
+        }
         return Err("No transparent UTXOs available".into());
     }
 
@@ -597,6 +627,22 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     // Every supplied UTXO is spent, so a repeated outpoint here would go
     // straight into the transaction as a double-spend.
     reject_duplicate_outpoints(utxos)?;
+
+    // A delegated output cannot be spent by this path — it is P2CS, and signing
+    // it against a P2PKH preimage yields a transaction the network rejects.
+    // Erroring rather than skipping, because the caller named this exact set and
+    // silently dropping one would produce a transaction that does not match what
+    // they asked for.
+    for u in utxos {
+        if crate::wallet::is_delegated_utxo(u) {
+            return Err(format!(
+                "UTXO {}:{} is delegated for cold staking and cannot be spent as an ordinary \
+                 output — use create_coldstake_withdrawal to redeem it",
+                u.txid, u.vout
+            )
+            .into());
+        }
+    }
 
     for r in recipients {
         if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
