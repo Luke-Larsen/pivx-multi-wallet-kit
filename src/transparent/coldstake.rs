@@ -31,8 +31,8 @@ use crate::fees;
 use crate::keys;
 use crate::params::{PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
 use crate::transparent::builder::{
-    SpentOutpoint, TransparentTransactionResult, TxOutput, reject_duplicate_outpoints,
-    sign_and_serialize,
+    SigningInput, SpentOutpoint, TransparentTransactionResult, TxOutput,
+    reject_duplicate_outpoints, sign_and_serialize,
 };
 use crate::wallet::{SerializedUTXO, WalletData};
 use std::error::Error;
@@ -370,13 +370,12 @@ pub fn create_delegation_transaction(
         outputs.push(TxOutput { value: change, script: own_script.clone() });
     }
 
-    let txhex = sign_and_serialize(
-        &selection.selected,
-        &outputs,
-        &own_script,
-        &pubkey_bytes,
-        &privkey_bytes,
-    )?;
+    let signing_inputs: Vec<SigningInput> = selection
+        .selected
+        .iter()
+        .map(|u| SigningInput::p2pkh(u.clone(), &own_script))
+        .collect();
+    let txhex = sign_and_serialize(&signing_inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
 
     let spent: Vec<SpentOutpoint> = selection
         .selected
@@ -397,6 +396,114 @@ pub fn estimate_delegation_fee(
     amount: u64,
 ) -> Result<u64, Box<dyn Error>> {
     Ok(select_for_delegation(wallet, staking_address, amount)?.fee)
+}
+
+/// Withdraw delegated coins: P2CS inputs → an ordinary P2PKH output.
+///
+/// Spends `delegated` back to `to_address`, ending the delegation. Every
+/// supplied UTXO is spent; any remainder after fee returns to the owner address
+/// as change.
+///
+/// Each UTXO's `script` field must carry the hex `scriptPubKey` of the P2CS
+/// output being spent. That is not optional bookkeeping — the sighash commits to
+/// the exact script, so it cannot be inferred, and `parse_blockbook_utxos`
+/// leaves the field empty. Callers fetch it from their explorer alongside the
+/// outpoint.
+///
+/// The owner hash in every script must match the key at `from_change/from_index`,
+/// or the wallet cannot produce a signature that satisfies the output. That is
+/// checked up front rather than discovered as a rejected broadcast.
+pub fn create_coldstake_withdrawal(
+    bip39_seed: &[u8],
+    from_change: u32,
+    from_index: u32,
+    delegated: &[SerializedUTXO],
+    to_address: &str,
+    amount: u64,
+) -> Result<TransparentTransactionResult, Box<dyn Error>> {
+    if delegated.is_empty() {
+        return Err("No delegated UTXOs provided".into());
+    }
+    if amount == 0 {
+        return Err("Withdrawal amount is zero".into());
+    }
+    reject_duplicate_outpoints(delegated)?;
+
+    let (own_address, pubkey_bytes, privkey_bytes) =
+        keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
+    let owner = decode_owner_address(&own_address)?;
+    let own_script = p2pkh_script_from_hash(&owner);
+
+    // Resolve each input's P2CS script and confirm this wallet owns it.
+    let mut inputs = Vec::with_capacity(delegated.len());
+    let mut total: u64 = 0;
+    for (i, utxo) in delegated.iter().enumerate() {
+        if utxo.script.is_empty() {
+            return Err(format!(
+                "UTXO {}:{} has no script — withdrawing a delegation needs the P2CS \
+                 scriptPubKey, which the sighash commits to and cannot be inferred",
+                utxo.txid, utxo.vout
+            )
+            .into());
+        }
+        let script = crate::simd::hex::hex_string_to_bytes(&utxo.script);
+        let hashes = parse_p2cs_script(&script).map_err(|e| {
+            format!("UTXO {}:{} (input {i}) is not a delegated output: {e}", utxo.txid, utxo.vout)
+        })?;
+        if hashes.owner != owner {
+            return Err(format!(
+                "UTXO {}:{} is owned by {} — this wallet's key at {from_change}/{from_index} is \
+                 {own_address}, so it cannot sign for it",
+                utxo.txid,
+                utxo.vout,
+                encode_checked(PIVX_PUBKEY_PREFIX, &hashes.owner),
+            )
+            .into());
+        }
+        total = total
+            .checked_add(utxo.amount)
+            .ok_or("UTXO total overflow — caller passed malformed amounts")?;
+        inputs.push(SigningInput {
+            utxo: utxo.clone(),
+            prevout_script: script,
+            cold_stake_owner: true,
+        });
+    }
+
+    // A P2CS redeem script is one byte longer than a P2PKH one (the OP_FALSE
+    // branch selector), so declare that rather than under-paying.
+    let fee = fees::estimate_raw_transparent_fee_with_extra(delegated.len(), 2, delegated.len());
+    let needed = amount.checked_add(fee).ok_or("Amount plus fee overflows u64")?;
+    if total < needed {
+        return Err(format!(
+            "Insufficient delegated balance. Have: {total} sat, need: {amount} sat + {fee} sat fee"
+        )
+        .into());
+    }
+
+    let mut outputs = vec![TxOutput {
+        value: amount,
+        script: keys::address_to_p2pkh_script(to_address)?,
+    }];
+    let change = total - needed;
+    if change > 0 {
+        outputs.push(TxOutput { value: change, script: own_script });
+    }
+
+    let txhex = sign_and_serialize(&inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
+
+    let spent: Vec<SpentOutpoint> = delegated
+        .iter()
+        .map(|u| SpentOutpoint { txid: u.txid.clone(), vout: u.vout })
+        .collect();
+
+    Ok(TransparentTransactionResult { txhex, spent, amount, fee })
+}
+
+/// Fee [`create_coldstake_withdrawal`] will charge for `input_count` delegated
+/// inputs.
+pub fn estimate_coldstake_withdrawal_fee(input_count: usize) -> u64 {
+    fees::estimate_raw_transparent_fee_with_extra(input_count, 2, input_count)
 }
 
 struct DelegationSelection {

@@ -507,13 +507,11 @@ pub fn create_raw_transparent_transaction_to_many(
 
     let change = selection.total - amount - fee;
     let outputs = resolve_outputs(recipients, change, &own_script)?;
-    let txhex = sign_and_serialize(
-        &selected,
-        &outputs,
-        &own_script,
-        &pubkey_bytes,
-        &privkey_bytes,
-    )?;
+    let signing_inputs: Vec<SigningInput> = selected
+        .iter()
+        .map(|u| SigningInput::p2pkh(u.clone(), &own_script))
+        .collect();
+    let txhex = sign_and_serialize(&signing_inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
 
     let spent: Vec<SpentOutpoint> = selected
         .iter()
@@ -640,13 +638,11 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     let change = total - needed;
     let selected = utxos.to_vec();
     let outputs = resolve_outputs(recipients, change, &own_script)?;
-    let txhex = sign_and_serialize(
-        &selected,
-        &outputs,
-        &own_script,
-        &pubkey_bytes,
-        &privkey_bytes,
-    )?;
+    let signing_inputs: Vec<SigningInput> = selected
+        .iter()
+        .map(|u| SigningInput::p2pkh(u.clone(), &own_script))
+        .collect();
+    let txhex = sign_and_serialize(&signing_inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
 
     let spent: Vec<SpentOutpoint> = selected
         .iter()
@@ -670,8 +666,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
 /// pair, so the preimage commits to exactly the bytes [`write_outputs`] will
 /// emit into the transaction body — however many outputs there are.
 fn compute_sighash(
-    inputs: &[SerializedUTXO],
-    own_script: &[u8],
+    inputs: &[SigningInput],
     signing_index: usize,
     outputs: &[TxOutput],
 ) -> [u8; 32] {
@@ -679,15 +674,18 @@ fn compute_sighash(
 
     preimage.extend_from_slice(&1u32.to_le_bytes()); // version
     write_varint(&mut preimage, inputs.len() as u64);
-    for (i, utxo) in inputs.iter().enumerate() {
-        let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&utxo.txid);
+    for (i, input) in inputs.iter().enumerate() {
+        let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&input.utxo.txid);
         txid_bytes.reverse();
         preimage.extend_from_slice(&txid_bytes);
-        preimage.extend_from_slice(&utxo.vout.to_le_bytes());
+        preimage.extend_from_slice(&input.utxo.vout.to_le_bytes());
 
+        // The input being signed commits to the scriptPubKey it is spending —
+        // which for a delegated output is the 51-byte P2CS script, not a P2PKH
+        // one. Every other input contributes an empty script.
         if i == signing_index {
-            write_varint(&mut preimage, own_script.len() as u64);
-            preimage.extend_from_slice(own_script);
+            write_varint(&mut preimage, input.prevout_script.len() as u64);
+            preimage.extend_from_slice(&input.prevout_script);
         } else {
             preimage.push(0x00);
         }
@@ -712,10 +710,43 @@ fn compute_sighash(
 /// UTXOs and recipients, not in how a signed transaction is laid out. Keeping
 /// the signing loop in one place means the sighash and the serialized body are
 /// always produced from the same `outputs` slice.
+/// One input to sign, with everything that differs between input types.
+///
+/// Two things vary and both must vary together: the `scriptPubKey` committed to
+/// in this input's sighash preimage, and whether the redeem script carries the
+/// cold-staking branch selector. Signing a P2CS input against a P2PKH preimage
+/// produces a signature the network rejects, so they are carried on one struct
+/// rather than passed as independent arguments that could disagree.
+pub(crate) struct SigningInput {
+    pub(crate) utxo: SerializedUTXO,
+    /// The `scriptPubKey` being spent. Goes into the preimage at this input's
+    /// position; every other input contributes an empty script.
+    pub(crate) prevout_script: Vec<u8>,
+    /// Insert `OP_FALSE` between signature and pubkey, selecting the `OP_ELSE`
+    /// (owner) branch of a P2CS script. False for ordinary P2PKH inputs.
+    pub(crate) cold_stake_owner: bool,
+}
+
+impl SigningInput {
+    /// An ordinary P2PKH input paying the wallet's own key.
+    pub(crate) fn p2pkh(utxo: SerializedUTXO, own_script: &[u8]) -> Self {
+        SigningInput {
+            utxo,
+            prevout_script: own_script.to_vec(),
+            cold_stake_owner: false,
+        }
+    }
+}
+
+/// Sign every input and emit the finished v1 transaction body.
+///
+/// Shared by all the raw transparent builders — they differ in how they pick
+/// inputs and outputs, not in how a signed transaction is laid out. Keeping the
+/// signing loop in one place means the sighash and the serialized body are
+/// always produced from the same `outputs` slice.
 pub(crate) fn sign_and_serialize(
-    selected: &[SerializedUTXO],
+    inputs: &[SigningInput],
     outputs: &[TxOutput],
-    own_script: &[u8],
     pubkey_bytes: &[u8],
     privkey_bytes: &[u8],
 ) -> Result<String, Box<dyn Error>> {
@@ -725,25 +756,31 @@ pub(crate) fn sign_and_serialize(
 
     let mut signed_tx = Vec::new();
     signed_tx.extend_from_slice(&1u32.to_le_bytes()); // version
-    write_varint(&mut signed_tx, selected.len() as u64);
+    write_varint(&mut signed_tx, inputs.len() as u64);
 
-    for (input_idx, utxo) in selected.iter().enumerate() {
-        let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&utxo.txid);
+    for (input_idx, input) in inputs.iter().enumerate() {
+        let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&input.utxo.txid);
         txid_bytes.reverse();
         signed_tx.extend_from_slice(&txid_bytes);
-        signed_tx.extend_from_slice(&utxo.vout.to_le_bytes());
+        signed_tx.extend_from_slice(&input.utxo.vout.to_le_bytes());
 
-        let sighash = compute_sighash(selected, own_script, input_idx, outputs);
+        let sighash = compute_sighash(inputs, input_idx, outputs);
 
         let msg = secp256k1::Message::from_digest(sighash);
         let sig = secp.sign_ecdsa(&msg, &sk);
         let mut sig_bytes = sig.serialize_der().to_vec();
         sig_bytes.push(0x01); // SIGHASH_ALL
 
-        let script_sig_len = sig_bytes.len() + pubkey_bytes.len() + 2;
+        // P2PKH: <push sig> <sig> <push key> <key>. The cold-staking owner path
+        // inserts a single OP_FALSE between them.
+        let selector_len = usize::from(input.cold_stake_owner);
+        let script_sig_len = sig_bytes.len() + pubkey_bytes.len() + 2 + selector_len;
         write_varint(&mut signed_tx, script_sig_len as u64);
         signed_tx.push(sig_bytes.len() as u8);
         signed_tx.extend_from_slice(&sig_bytes);
+        if input.cold_stake_owner {
+            signed_tx.push(0x00); // OP_FALSE — take the OP_ELSE (owner) branch
+        }
         signed_tx.push(pubkey_bytes.len() as u8);
         signed_tx.extend_from_slice(pubkey_bytes);
 

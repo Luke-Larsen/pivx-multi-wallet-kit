@@ -512,6 +512,53 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Withdraw delegated coins, ending a cold-staking delegation.
+    ///
+    /// Spends the supplied P2CS outputs back to `toAddress` as an ordinary
+    /// transparent payment. Every supplied UTXO is spent; any remainder returns
+    /// to the owner address as change.
+    ///
+    /// Each UTXO's `script` field **must** carry the hex `scriptPubKey` of the
+    /// delegated output. That is not optional: the signature commits to the exact
+    /// script, so it cannot be inferred, and `parseBlockbookUtxos` leaves the
+    /// field empty — fetch it from your explorer alongside the outpoint. Use
+    /// `inspectColdStakeScript` to confirm a script is a delegation this wallet
+    /// owns before passing it in.
+    ///
+    /// `fromChange` / `fromIndex` select the HD slot that owns the delegation.
+    /// A mismatch is rejected up front rather than producing a transaction the
+    /// network would refuse.
+    #[wasm_bindgen(js_name = withdrawColdStake)]
+    pub fn withdraw_cold_stake(
+        &self,
+        from_change: u32,
+        from_index: u32,
+        utxos: UtxosInput,
+        to_address: &str,
+        amount_sat: u64,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::coldstake::create_coldstake_withdrawal(
+            &bip39_seed,
+            from_change,
+            from_index,
+            &utxos.utxos,
+            to_address,
+            amount_sat,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee `withdrawColdStake` will charge for `inputCount` delegated inputs.
+    ///
+    /// A cold-staking redeem script is one byte longer than a P2PKH one, so this
+    /// is slightly above the equivalent ordinary spend.
+    #[wasm_bindgen(js_name = estimateWithdrawColdStakeFee)]
+    pub fn estimate_withdraw_cold_stake_fee(input_count: u32) -> u64 {
+        crate::transparent::coldstake::estimate_coldstake_withdrawal_fee(input_count as usize)
+    }
+
     /// Whether a `scriptPubKey` (hex) is a pay-to-cold-staking output, and if so
     /// which addresses it names.
     ///
