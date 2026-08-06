@@ -825,25 +825,106 @@ fn signature_holds_across_the_input_count_varint_boundary() {
     }
 }
 
-/// A single-satoshi output must survive serialization exactly. Network dust
-/// policy is the node's business, but the kit must not silently drop or round it.
+/// Dust recipients are refused. A transaction carrying an output worth less than
+/// it costs to spend is non-standard — `IsStandardTx` rejects it with
+/// `reason = "dust"` — so building one hands the caller bytes no node will
+/// relay. Confirmed against a live node, which answered `-26: dust:`.
 #[test]
-fn dust_output_is_preserved_exactly() {
+fn dust_recipients_are_rejected() {
     let bip39_seed = seed();
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("c", 0, 100_000_000)];
+
+    // 5460 sat for a 25-byte P2PKH script.
+    let threshold = pivx_wallet_kit::fees::dust_threshold(25);
+    assert_eq!(threshold, 5_460, "P2PKH dust threshold changed");
+
+    for amount in [1u64, 100, threshold - 1] {
+        let err = create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed,
+            0,
+            5,
+            &utxos,
+            &[Recipient { address: to.clone(), amount }],
+        )
+        .expect_err("a dust recipient must be rejected")
+        .to_string();
+        assert!(err.contains("dust"), "amount {amount}: got {err}");
+    }
+
+    // Exactly at the threshold is fine, and still signs correctly.
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to, amount: threshold }],
+    )
+    .expect("the threshold itself is not dust");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs[0].value, threshold);
+    assert_eq!(verify_all_signatures(&tx), 1);
+}
+
+/// Dust *change* is dropped rather than emitted, since keeping it would make the
+/// transaction unrelayable. The dropped value goes to the miner, so the fee the
+/// result reports must be the fee actually paid — not the estimate.
+#[test]
+fn dust_change_is_absorbed_into_the_fee() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let total = 100_000_000u64;
+    let utxos = vec![utxo("d", 0, total)];
+
+    // Aim to leave 1000 sat of change — well under the 5460 threshold.
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let amount = total - fee - 1_000;
 
     let result = create_raw_transparent_transaction_from_utxos_to_many(
         &bip39_seed,
         0,
         5,
         &utxos,
-        &[Recipient { address: to, amount: 1 }],
+        &[Recipient { address: to, amount }],
+    )
+    .expect("dust change should be dropped, not rejected");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs.len(), 1, "the dust change output must not be emitted");
+    assert_eq!(tx.outputs[0].value, amount);
+
+    // The reported fee absorbs the dropped change.
+    assert_eq!(result.fee, fee + 1_000, "reported fee should include the absorbed dust");
+    assert_eq!(total - amount, result.fee, "value must still be conserved");
+    assert_eq!(verify_all_signatures(&tx), 1);
+}
+
+/// Non-dust change is still emitted normally.
+#[test]
+fn non_dust_change_is_emitted() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let total = 100_000_000u64;
+    let utxos = vec![utxo("e", 0, total)];
+
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let change = 10_000u64; // comfortably above 5460
+    let amount = total - fee - change;
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to, amount }],
     )
     .unwrap();
 
     let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
-    assert_eq!(tx.outputs[0].value, 1, "1 sat output must round-trip exactly");
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, change);
+    assert_eq!(result.fee, fee);
     assert_eq!(verify_all_signatures(&tx), 1);
 }
 

@@ -47,6 +47,38 @@ use std::error::Error;
 /// implementations would not.
 pub const MIN_COLDSTAKING_AMOUNT: u64 = 100_000_000;
 
+/// Preferred size of a single delegated output: 500 PIV.
+///
+/// `stakeSplitTarget` in MyPIVXWallet's `chain_params.json`. Staking works per
+/// output, so one large delegation is a single staking unit while several
+/// right-sized ones compete independently. MyPIVXWallet splits on this boundary
+/// when delegating, and [`split_delegation_amounts`] reproduces its arithmetic.
+pub const STAKE_SPLIT_TARGET: u64 = 50_000_000_000;
+
+/// Divide a delegation into output-sized pieces, matching MyPIVXWallet's
+/// `createAndSendTransaction` split.
+///
+/// Below the target the whole amount is one output. At or above it, the amount
+/// is cut into `floor(amount / target)` pieces, with the remainder folded into
+/// the *first* one — so every piece is at least the target and none is a stray
+/// fragment. Returns amounts summing exactly to `amount`.
+///
+/// ```text
+///  400 PIV -> [400]                  (below target)
+/// 1000 PIV -> [500, 500]
+/// 1200 PIV -> [700, 500]             (remainder joins the first)
+/// ```
+pub fn split_delegation_amounts(amount: u64, target: u64) -> Vec<u64> {
+    if target == 0 || amount < target {
+        return vec![amount];
+    }
+    let pieces = amount / target;
+    let remainder = amount % target;
+    (0..pieces)
+        .map(|i| if i == 0 { target + remainder } else { target })
+        .collect()
+}
+
 // Opcodes, from PIVX Core `src/script/script.h`.
 const OP_DUP: u8 = 0x76;
 const OP_HASH160: u8 = 0xa9;
@@ -361,12 +393,18 @@ pub fn create_delegation_transaction(
     let staker = decode_staking_address(staking_address)?;
     let own_script = p2pkh_script_from_hash(&owner);
 
-    let mut outputs = vec![TxOutput {
-        value: amount,
-        script: build_p2cs_script(&staker, &owner, variant),
-    }];
+    // Split into staking-sized pieces. Staking works per output, so one large
+    // delegation is a single staking unit where several compete independently.
+    let p2cs_script = build_p2cs_script(&staker, &owner, variant);
+    let mut outputs: Vec<TxOutput> = split_delegation_amounts(amount, STAKE_SPLIT_TARGET)
+        .into_iter()
+        .map(|value| TxOutput { value, script: p2cs_script.clone() })
+        .collect();
+
     let change = selection.total - amount - selection.fee;
-    if change > 0 {
+    // Dust change would make the transaction non-standard; drop it to the miner
+    // instead, exactly as the transparent builders do.
+    if change > 0 && !fees::is_dust(change, own_script.len()) {
         outputs.push(TxOutput { value: change, script: own_script.clone() });
     }
 
@@ -375,6 +413,8 @@ pub fn create_delegation_transaction(
         .iter()
         .map(|u| SigningInput::p2pkh(u.clone(), &own_script))
         .collect();
+    // Dropped dust change raises the fee actually paid.
+    let fee = selection.total - outputs.iter().map(|o| o.value).sum::<u64>();
     let txhex = sign_and_serialize(&signing_inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
 
     let spent: Vec<SpentOutpoint> = selection
@@ -383,7 +423,7 @@ pub fn create_delegation_transaction(
         .map(|u| SpentOutpoint { txid: u.txid.clone(), vout: u.vout })
         .collect();
 
-    Ok(TransparentTransactionResult { txhex, spent, amount, fee: selection.fee })
+    Ok(TransparentTransactionResult { txhex, spent, amount, fee })
 }
 
 /// Fee [`create_delegation_transaction`] will charge for the same inputs.
@@ -413,6 +453,26 @@ pub fn estimate_delegation_fee(
 /// The owner hash in every script must match the key at `from_change/from_index`,
 /// or the wallet cannot produce a signature that satisfies the output. That is
 /// checked up front rather than discovered as a rejected broadcast.
+/// Where the remainder of a partial withdrawal goes.
+///
+/// This is the difference between "withdraw some and keep earning" and
+/// "withdraw some and silently stop staking the rest". A withdrawal spends its
+/// inputs whole, so any part not being withdrawn comes back as change — and
+/// plain change is an ordinary output, no longer delegated.
+#[derive(Debug, Clone, Copy)]
+pub enum WithdrawalChange<'a> {
+    /// Return change as an ordinary transparent output. The remainder stops
+    /// staking.
+    Plain,
+    /// Re-delegate change to this staking address, keeping it staked.
+    ///
+    /// Falls back to [`WithdrawalChange::Plain`] when the change is below
+    /// [`MIN_COLDSTAKING_AMOUNT`], since a smaller delegation is one the
+    /// reference wallets will not create. MyPIVXWallet applies the same rule via
+    /// its `delegateChange` option, which its staking UI enables by default.
+    Delegate(&'a str),
+}
+
 pub fn create_coldstake_withdrawal(
     bip39_seed: &[u8],
     from_change: u32,
@@ -420,6 +480,35 @@ pub fn create_coldstake_withdrawal(
     delegated: &[SerializedUTXO],
     to_address: &str,
     amount: u64,
+) -> Result<TransparentTransactionResult, Box<dyn Error>> {
+    create_coldstake_withdrawal_with_change(
+        bip39_seed,
+        from_change,
+        from_index,
+        delegated,
+        to_address,
+        amount,
+        WithdrawalChange::Plain,
+    )
+}
+
+/// As [`create_coldstake_withdrawal`], choosing what happens to the remainder.
+///
+/// Use [`WithdrawalChange::Delegate`] to keep the unwithdrawn portion staking.
+/// Without it a partial withdrawal quietly un-stakes everything the spent inputs
+/// held beyond the amount taken, which is rarely what a user pressing
+/// "withdraw 4,000 of my 10,000" expects.
+///
+/// Note that inputs *not* supplied are untouched and keep staking either way —
+/// this only governs the change from the inputs actually spent.
+pub fn create_coldstake_withdrawal_with_change(
+    bip39_seed: &[u8],
+    from_change: u32,
+    from_index: u32,
+    delegated: &[SerializedUTXO],
+    to_address: &str,
+    amount: u64,
+    change_policy: WithdrawalChange<'_>,
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
     if delegated.is_empty() {
         return Err("No delegated UTXOs provided".into());
@@ -481,14 +570,35 @@ pub fn create_coldstake_withdrawal(
         .into());
     }
 
-    let mut outputs = vec![TxOutput {
-        value: amount,
-        script: keys::address_to_p2pkh_script(to_address)?,
-    }];
+    let destination = keys::address_to_p2pkh_script(to_address)?;
+    if fees::is_dust(amount, destination.len()) {
+        return Err(format!(
+            "Withdrawal of {amount} sat is below the dust threshold of {} sat — a transaction \
+             containing a dust output is non-standard and will not relay",
+            fees::dust_threshold(destination.len())
+        )
+        .into());
+    }
+    let mut outputs = vec![TxOutput { value: amount, script: destination }];
+
     let change = total - needed;
     if change > 0 {
-        outputs.push(TxOutput { value: change, script: own_script });
+        // Re-delegating keeps the remainder staked, but only above the minimum
+        // a delegation is allowed to be; below that it has to come back plain.
+        let change_script = match change_policy {
+            WithdrawalChange::Delegate(staking_address) if change >= MIN_COLDSTAKING_AMOUNT => {
+                let staker = decode_staking_address(staking_address)?;
+                build_p2cs_script(&staker, &owner, ColdStakeVariant::Lof)
+            }
+            _ => own_script,
+        };
+        if !fees::is_dust(change, change_script.len()) {
+            outputs.push(TxOutput { value: change, script: change_script });
+        }
     }
+
+    // Dropped dust change raises the fee actually paid.
+    let fee = total - outputs.iter().map(|o| o.value).sum::<u64>();
 
     let txhex = sign_and_serialize(&inputs, &outputs, &pubkey_bytes, &privkey_bytes)?;
 
@@ -547,14 +657,16 @@ fn select_for_delegation(
         return Err("No spendable transparent UTXOs available to fund a delegation".into());
     }
 
-    // One P2CS output plus a possible change output. The P2CS script is 51
-    // bytes against the fee model's flat 25-byte assumption, so the difference
-    // is declared rather than silently under-paid.
+    // The delegation is split into staking-sized pieces, so the fee covers that
+    // many P2CS outputs plus a possible change output. Each P2CS script is 51
+    // bytes against the fee model's flat 25-byte assumption, so the surcharge is
+    // declared per piece rather than silently under-paid.
+    let piece_count = split_delegation_amounts(amount, STAKE_SPLIT_TARGET).len();
     let fee_for = |input_count: usize| {
         fees::estimate_raw_transparent_fee_with_extra(
             input_count,
-            2,
-            fees::P2CS_OUTPUT_EXTRA_BYTES,
+            piece_count + 1,
+            piece_count * fees::P2CS_OUTPUT_EXTRA_BYTES,
         )
     };
 

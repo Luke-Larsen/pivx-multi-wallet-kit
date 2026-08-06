@@ -109,13 +109,28 @@ fn resolve_outputs(
         if r.amount == 0 {
             return Err(format!("Recipient {} has a zero amount", r.address).into());
         }
-        outputs.push(TxOutput {
-            value: r.amount,
-            script: keys::address_to_p2pkh_script(&r.address)?,
-        });
+        let script = keys::address_to_p2pkh_script(&r.address)?;
+        // A dust output makes the whole transaction non-standard, so no node
+        // relays it. Better to refuse than to hand back bytes that cannot be
+        // broadcast.
+        if fees::is_dust(r.amount, script.len()) {
+            return Err(format!(
+                "Recipient {} is below the dust threshold: {} sat, minimum {} sat. A transaction \
+                 containing a dust output is non-standard and will not relay.",
+                r.address,
+                r.amount,
+                fees::dust_threshold(script.len())
+            )
+            .into());
+        }
+        outputs.push(TxOutput { value: r.amount, script });
     }
 
-    if change > 0 {
+    // Dust change is dropped rather than emitted: keeping it would make the
+    // transaction unrelayable, so the remainder goes to the miner as fee. This
+    // is what the reference wallets do, and it is why the caller's fee can come
+    // out slightly above the estimate.
+    if change > 0 && !fees::is_dust(change, change_script.len()) {
         outputs.push(TxOutput {
             value: change,
             script: change_script.to_vec(),
@@ -537,6 +552,9 @@ pub fn create_raw_transparent_transaction_to_many(
 
     let change = selection.total - amount - fee;
     let outputs = resolve_outputs(recipients, change, &own_script)?;
+    // `resolve_outputs` drops dust change rather than emitting an unrelayable
+    // output, so the fee actually paid is whatever the outputs did not claim.
+    let fee = selection.total - outputs.iter().map(|o| o.value).sum::<u64>();
     let signing_inputs: Vec<SigningInput> = selected
         .iter()
         .map(|u| SigningInput::p2pkh(u.clone(), &own_script))
@@ -684,6 +702,8 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     let change = total - needed;
     let selected = utxos.to_vec();
     let outputs = resolve_outputs(recipients, change, &own_script)?;
+    // See the note in the wallet-state path: dropped dust change raises the fee.
+    let fee = total - outputs.iter().map(|o| o.value).sum::<u64>();
     let signing_inputs: Vec<SigningInput> = selected
         .iter()
         .map(|u| SigningInput::p2pkh(u.clone(), &own_script))

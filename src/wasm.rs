@@ -590,6 +590,48 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Withdraw part of a delegation and keep the remainder staked.
+    ///
+    /// A withdrawal spends its inputs whole, so anything not withdrawn comes
+    /// back as change — and ordinary change stops staking. Pass the staking
+    /// address to re-delegate that change instead, which is what someone
+    /// withdrawing 4,000 of their 10,000 usually expects.
+    ///
+    /// `changeStakingAddress` may differ from the delegation being spent, which
+    /// moves the remainder to a different staking node in one transaction.
+    /// Change below 1 PIV cannot be delegated — the reference wallets will not
+    /// create a smaller delegation — and comes back plain instead.
+    ///
+    /// Inputs you do not supply are untouched and keep staking regardless.
+    ///
+    /// ```js
+    /// const tx = wallet.withdrawColdStakeKeepingRest(
+    ///   0, 0, { utxos: delegatedUtxos }, myAddress, 400000000000n, stakingAddress);
+    /// ```
+    #[wasm_bindgen(js_name = withdrawColdStakeKeepingRest)]
+    pub fn withdraw_cold_stake_keeping_rest(
+        &self,
+        from_change: u32,
+        from_index: u32,
+        utxos: UtxosInput,
+        to_address: &str,
+        amount_sat: u64,
+        change_staking_address: &str,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::coldstake::create_coldstake_withdrawal_with_change(
+            &bip39_seed,
+            from_change,
+            from_index,
+            &utxos.utxos,
+            to_address,
+            amount_sat,
+            crate::transparent::coldstake::WithdrawalChange::Delegate(change_staking_address),
+        )
+        .map_err(js_err)
+    }
+
     /// Fee `withdrawColdStake` will charge for `inputCount` delegated inputs.
     ///
     /// A cold-staking redeem script is one byte longer than a P2PKH one, so this
