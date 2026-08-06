@@ -11,6 +11,9 @@
 //! signature covering a *different* script than the one serialized would still
 //! look plausible to any check that only inspects lengths and totals.
 
+mod common;
+use common::{decode, verify_all_signatures as verify_signatures};
+
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::coldstake::{
@@ -19,8 +22,6 @@ use pivx_wallet_kit::transparent::coldstake::{
     is_p2cs_lof, parse_p2cs_script,
 };
 use pivx_wallet_kit::wallet::{self, SerializedUTXO, WalletData};
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256};
 
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -51,117 +52,6 @@ fn staking_addr() -> String {
     encode_staking_address(&STAKER)
 }
 
-// --- minimal tx decoding, independent of the builder ------------------------
-
-struct Decoded {
-    version: u32,
-    inputs: Vec<([u8; 32], u32, Vec<u8>, u32)>,
-    outputs: Vec<(u64, Vec<u8>)>,
-    locktime: u32,
-    consumed_all: bool,
-}
-
-fn decode(bytes: &[u8]) -> Decoded {
-    let varint = |p: &mut usize| -> u64 {
-        let f = bytes[*p];
-        match f {
-            0xfd => { let v = u16::from_le_bytes(bytes[*p+1..*p+3].try_into().unwrap()) as u64; *p += 3; v }
-            0xfe => { let v = u32::from_le_bytes(bytes[*p+1..*p+5].try_into().unwrap()) as u64; *p += 5; v }
-            0xff => { let v = u64::from_le_bytes(bytes[*p+1..*p+9].try_into().unwrap()); *p += 9; v }
-            n => { *p += 1; n as u64 }
-        }
-    };
-    let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    let mut p = 4usize;
-    let n_in = varint(&mut p);
-    let mut inputs = Vec::new();
-    for _ in 0..n_in {
-        let txid: [u8; 32] = bytes[p..p+32].try_into().unwrap(); p += 32;
-        let vout = u32::from_le_bytes(bytes[p..p+4].try_into().unwrap()); p += 4;
-        let sl = varint(&mut p) as usize;
-        let script_sig = bytes[p..p+sl].to_vec(); p += sl;
-        let seq = u32::from_le_bytes(bytes[p..p+4].try_into().unwrap()); p += 4;
-        inputs.push((txid, vout, script_sig, seq));
-    }
-    let n_out = varint(&mut p);
-    let mut outputs = Vec::new();
-    for _ in 0..n_out {
-        let value = u64::from_le_bytes(bytes[p..p+8].try_into().unwrap()); p += 8;
-        let sl = varint(&mut p) as usize;
-        outputs.push((value, bytes[p..p+sl].to_vec())); p += sl;
-    }
-    let locktime = u32::from_le_bytes(bytes[p..p+4].try_into().unwrap()); p += 4;
-    Decoded { version, inputs, outputs, locktime, consumed_all: p == bytes.len() }
-}
-
-fn write_varint(out: &mut Vec<u8>, n: u64) {
-    match n {
-        0..=0xfc => out.push(n as u8),
-        0xfd..=0xffff => { out.push(0xfd); out.extend_from_slice(&(n as u16).to_le_bytes()); }
-        0x10000..=0xffff_ffff => { out.push(0xfe); out.extend_from_slice(&(n as u32).to_le_bytes()); }
-        _ => { out.push(0xff); out.extend_from_slice(&n.to_le_bytes()); }
-    }
-}
-
-/// Rebuild SIGHASH_ALL for one input from the decoded transaction.
-fn sighash_all(tx: &Decoded, signing_index: usize, prevout_script: &[u8]) -> [u8; 32] {
-    let mut pre = Vec::new();
-    pre.extend_from_slice(&tx.version.to_le_bytes());
-    write_varint(&mut pre, tx.inputs.len() as u64);
-    for (i, (txid, vout, _, seq)) in tx.inputs.iter().enumerate() {
-        pre.extend_from_slice(txid);
-        pre.extend_from_slice(&vout.to_le_bytes());
-        if i == signing_index {
-            write_varint(&mut pre, prevout_script.len() as u64);
-            pre.extend_from_slice(prevout_script);
-        } else {
-            pre.push(0x00);
-        }
-        pre.extend_from_slice(&seq.to_le_bytes());
-    }
-    write_varint(&mut pre, tx.outputs.len() as u64);
-    for (value, script) in &tx.outputs {
-        pre.extend_from_slice(&value.to_le_bytes());
-        write_varint(&mut pre, script.len() as u64);
-        pre.extend_from_slice(script);
-    }
-    pre.extend_from_slice(&tx.locktime.to_le_bytes());
-    pre.extend_from_slice(&1u32.to_le_bytes());
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&Sha256::digest(Sha256::digest(&pre)));
-    out
-}
-
-/// Verify every input, reconstructing the prevout script from the pubkey in the
-/// scriptSig — the information a validating node has.
-fn verify_signatures(tx: &Decoded) -> usize {
-    let secp = secp256k1::Secp256k1::verification_only();
-    for (i, (_, _, script_sig, _)) in tx.inputs.iter().enumerate() {
-        let sig_push = script_sig[0] as usize;
-        let sig_with_type = &script_sig[1..1 + sig_push];
-        let (sig_der, hash_type) = sig_with_type.split_at(sig_with_type.len() - 1);
-        assert_eq!(hash_type[0], 0x01, "input {i}: expected SIGHASH_ALL");
-
-        let key_off = 1 + sig_push;
-        let key_push = script_sig[key_off] as usize;
-        let pubkey_bytes = &script_sig[key_off + 1..key_off + 1 + key_push];
-
-        let pkh = Ripemd160::digest(Sha256::digest(pubkey_bytes));
-        let mut prevout = vec![0x76, 0xa9, 0x14];
-        prevout.extend_from_slice(&pkh);
-        prevout.extend_from_slice(&[0x88, 0xac]);
-
-        let sighash = sighash_all(tx, i, &prevout);
-        let msg = secp256k1::Message::from_digest(sighash);
-        let sig = secp256k1::ecdsa::Signature::from_der(sig_der).unwrap();
-        let pk = secp256k1::PublicKey::from_slice(pubkey_bytes).unwrap();
-        secp.verify_ecdsa(&msg, &sig, &pk).unwrap_or_else(|e| {
-            panic!("input {i}: signature does not commit to this delegation ({e})")
-        });
-    }
-    tx.inputs.len()
-}
-
 // --- tests ------------------------------------------------------------------
 
 /// The delegation must produce a valid P2CS output naming the requested staker
@@ -181,7 +71,7 @@ fn delegation_produces_a_signed_p2cs_output() {
     assert_eq!(tx.outputs.len(), 2, "delegation + change");
 
     // Output 0 is the delegation.
-    let (value, script) = &tx.outputs[0];
+    let (value, script) = (&tx.outputs[0].value, &tx.outputs[0].script_pubkey);
     assert_eq!(*value, amount);
     assert_eq!(script.len(), P2CS_SCRIPT_LEN);
     assert!(is_p2cs(script), "output 0 is not a P2CS script");
@@ -197,7 +87,7 @@ fn delegation_produces_a_signed_p2cs_output() {
     assert_eq!(hashes.owner.to_vec(), own_pkh, "owner is not the wallet's own key");
 
     // Change returns to the wallet as plain P2PKH.
-    let (_, change_script) = &tx.outputs[1];
+    let change_script = &tx.outputs[1].script_pubkey;
     assert_eq!(change_script.len(), 25);
     assert_eq!(&change_script[3..23], &own_pkh[..]);
 
@@ -205,7 +95,7 @@ fn delegation_produces_a_signed_p2cs_output() {
     assert_eq!(verify_signatures(&tx), 1);
 
     // Value conservation.
-    let out_total: u64 = tx.outputs.iter().map(|(v, _)| v).sum();
+    let out_total: u64 = tx.outputs.iter().map(|o| o.value).sum();
     assert_eq!(500_000_000 - out_total, result.fee);
     assert_eq!(result.amount, amount);
 }
@@ -221,7 +111,7 @@ fn recovered_addresses_match_the_request() {
         create_delegation_transaction(&mut w, &seed(), &staking, 150_000_000, ColdStakeVariant::Lof)
             .unwrap();
     let tx = decode(&simd::hex::hex_string_to_bytes(&result.txhex));
-    let (recovered_staking, recovered_owner) = addresses_from_p2cs_script(&tx.outputs[0].1).unwrap();
+    let (recovered_staking, recovered_owner) = addresses_from_p2cs_script(&tx.outputs[0].script_pubkey).unwrap();
 
     assert_eq!(recovered_staking, staking);
     assert_eq!(recovered_owner, keys::get_transparent_address(TEST_MNEMONIC).unwrap());
@@ -240,7 +130,7 @@ fn altering_the_delegation_script_invalidates_the_signature() {
     assert_eq!(verify_signatures(&tx), 1);
 
     // Repoint the delegation at a different staker, keeping every length identical.
-    tx.outputs[0].1[6] ^= 0xff;
+    tx.outputs[0].script_pubkey[6] ^= 0xff;
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         verify_signatures(&tx);
@@ -265,7 +155,7 @@ fn delegation_without_change() {
 
     let tx = decode(&simd::hex::hex_string_to_bytes(&result.txhex));
     assert_eq!(tx.outputs.len(), 1, "expected no change output");
-    assert!(is_p2cs(&tx.outputs[0].1));
+    assert!(is_p2cs(&tx.outputs[0].script_pubkey));
     assert_eq!(verify_signatures(&tx), 1);
 }
 
@@ -284,7 +174,7 @@ fn delegation_across_several_inputs() {
     let tx = decode(&simd::hex::hex_string_to_bytes(&result.txhex));
     assert!(tx.inputs.len() >= 3);
     assert_eq!(verify_signatures(&tx), tx.inputs.len());
-    assert!(is_p2cs(&tx.outputs[0].1));
+    assert!(is_p2cs(&tx.outputs[0].script_pubkey));
 }
 
 /// The estimator must charge what the builder charges, including the P2CS
@@ -396,8 +286,8 @@ fn v6_variant_builds_and_signs() {
             .unwrap();
 
     let tx = decode(&simd::hex::hex_string_to_bytes(&result.txhex));
-    assert!(is_p2cs(&tx.outputs[0].1));
-    assert!(!is_p2cs_lof(&tx.outputs[0].1), "V6 must not use the LOF opcode");
-    assert_eq!(tx.outputs[0].1[4], 0xd2);
+    assert!(is_p2cs(&tx.outputs[0].script_pubkey));
+    assert!(!is_p2cs_lof(&tx.outputs[0].script_pubkey), "V6 must not use the LOF opcode");
+    assert_eq!(tx.outputs[0].script_pubkey[4], 0xd2);
     assert_eq!(verify_signatures(&tx), 1);
 }
