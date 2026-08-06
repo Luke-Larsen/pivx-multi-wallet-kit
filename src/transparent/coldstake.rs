@@ -577,9 +577,28 @@ pub fn create_coldstake_withdrawal_with_change(
         });
     }
 
-    // A P2CS redeem script is one byte longer than a P2PKH one (the OP_FALSE
-    // branch selector), so declare that rather than under-paying.
-    let fee = fees::estimate_raw_transparent_fee_with_extra(delegated.len(), 2, delegated.len());
+    // Two surcharges over the flat model, both learned the hard way:
+    //
+    //  - each P2CS redeem script is one byte longer than a P2PKH one (the
+    //    OP_FALSE branch selector), so one extra byte per input;
+    //  - re-delegated change is a 51-byte P2CS script rather than a 25-byte
+    //    P2PKH one, which the flat 34-bytes-per-output figure does not cover.
+    //
+    // Missing the second one produced a transaction a node rejected outright
+    // with `insufficient fee: 2290 < 2520` — the fee model has to track the
+    // real serialized size, because that is what the relay minimum is charged
+    // against. Budgeting for P2CS change even when the change turns out to be
+    // plain (below the delegation minimum) merely over-pays slightly, which is
+    // the safe direction.
+    let change_surcharge = match change_policy {
+        WithdrawalChange::Delegate(_) => fees::P2CS_OUTPUT_EXTRA_BYTES,
+        WithdrawalChange::Plain => 0,
+    };
+    let fee = fees::estimate_raw_transparent_fee_with_extra(
+        delegated.len(),
+        2,
+        delegated.len() + change_surcharge,
+    );
     let needed = amount.checked_add(fee).ok_or("Amount plus fee overflows u64")?;
     if total < needed {
         return Err(format!(
