@@ -44,6 +44,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes)         |
 | `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) |
 | `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry — no prover needed for transparent dests) |
+| `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders |
 | `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers |
 
 ## Building
@@ -196,6 +197,22 @@ const shieldSplit = wallet.sendShieldToMany({ recipients: [
   { address: transparentAddress, amount:  5_000_000n },
 ]}, chainTip + 1, params);
 
+// Cold staking. The staking address may stake the coins but never move them;
+// this wallet keeps spending authority, so the delegation can be withdrawn.
+// Amounts at or above 500 PIV are split into staking-sized outputs.
+const delegation = wallet.delegateColdStake(stakingAddress, 200_000_000n);
+
+// Withdraw part of a delegation and keep the remainder staked. Without the
+// staking address, change comes back as an ordinary output and stops staking.
+const partial = wallet.withdrawColdStakeKeepingRest(
+  0, 0, { utxos: delegatedUtxos }, myAddress, 400_000_000n, stakingAddress);
+
+// Identify delegated outputs. Note that Blockbook's UTXO endpoint omits
+// scripts, so `parseBlockbookUtxos` cannot populate them — fetch each funding
+// transaction if you need this classification.
+const info = Wallet.inspectColdStakeScript(scriptHex);
+// { isColdStake, isLof, stakingAddress, ownerAddress }
+
 // Consumer broadcasts `shieldTx.txhex` via whatever transport it chooses.
 
 // Encrypt before persisting to localStorage / IndexedDB:
@@ -206,6 +223,48 @@ localStorage.setItem('wallet', encrypted);
 **See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
 
 ## Status
+
+**v0.4.0** — **cold staking**, plus dust handling that was missing crate-wide.
+
+Delegate transparent funds to a staking key that can stake them but never move them,
+and withdraw them again: `delegateColdStake`, `withdrawColdStake`,
+`withdrawColdStakeKeepingRest`, `stakingAddress` / `stakingAddressAt`,
+`inspectColdStakeScript`, and matching fee estimators. Delegations at or above 500 PIV
+are split into staking-sized outputs, matching MyPIVXWallet's `stakeSplitTarget` —
+staking works per output, so one large delegation is a single staking unit where several
+compete independently.
+
+Every script constant was verified byte-for-byte against both PIVX Core and
+MyPIVXWallet rather than reconstructed, and the delegate → withdraw cycle is confirmed
+on mainnet (blocks 5522082 and 5522083). A wrong P2CS script does not fail loudly: it
+produces an output that is either unspendable or spendable by the wrong party.
+
+**One behaviour changed for everyone, not just cold staking.** PIVX rejects any output
+worth less than it costs to spend — `IsStandardTx` fails with `reason = "dust"`, so no
+node relays the transaction. The crate had no notion of this and would build
+transactions nothing would accept. See *Upgrading to 0.4.0*.
+
+### Upgrading to 0.4.0
+
+The cold-staking API is entirely new; nothing existing changed shape. Two behaviours
+differ:
+
+1. **Dust outputs are now handled.** The threshold is 5460 sat for an ordinary output
+   (6240 for a cold-staking one). Recipients below it are **rejected** rather than
+   silently producing an unrelayable transaction; change below it is **dropped to the
+   miner** rather than emitted.
+
+2. **`result.fee` is now the fee actually paid**, computed from inputs minus outputs,
+   rather than the estimate. When dust change is absorbed the two differ — the reported
+   figure is the larger, true one. Consumers displaying a fee to users will show a
+   slightly higher number in that case, which is the number the user actually pays.
+
+Detecting delegated outputs needs each UTXO's `script`, and Blockbook's UTXO endpoint
+omits it — `parseBlockbookUtxos` leaves the field empty. A delegated output whose script
+is unknown is treated as ordinary, so it counts as spendable and an ordinary send may
+select it, which the network then rejects. **Consumers using cold staking must populate
+`script`** (fetch the funding transaction, which does expose it). Wallets that never
+delegate are unaffected.
 
 **v0.3.0** — multi-recipient sends (`sendTransparentToMany`, `sendShieldToMany`,
 `sendTransparentFromUtxosToMany`, plus matching fee estimators), and four fixes to

@@ -338,6 +338,20 @@ pub fn build_p2cs_owner_script_sig(sig_with_hashtype: &[u8], pubkey: &[u8]) -> V
     script_sig
 }
 
+/// Build an ordinary P2PKH `scriptSig`: `<sig> <pubkey>`.
+///
+/// Sits beside [`build_p2cs_owner_script_sig`] so the signing loop has one
+/// definition of each redeem-script layout to choose between, rather than
+/// open-coding either.
+pub fn build_p2pkh_script_sig(sig_with_hashtype: &[u8], pubkey: &[u8]) -> Vec<u8> {
+    let mut script_sig = Vec::with_capacity(sig_with_hashtype.len() + pubkey.len() + 2);
+    script_sig.push(sig_with_hashtype.len() as u8);
+    script_sig.extend_from_slice(sig_with_hashtype);
+    script_sig.push(pubkey.len() as u8);
+    script_sig.extend_from_slice(pubkey);
+    script_sig
+}
+
 /// P2PKH `scriptPubKey` for a key hash — the form a P2CS output is redeemed
 /// *into* when an owner withdraws a delegation.
 pub fn p2pkh_script_from_hash(hash: &[u8; 20]) -> Vec<u8> {
@@ -430,6 +444,10 @@ pub fn create_delegation_transaction(
 ///
 /// Runs the identical selection, so a successful quote means the delegation
 /// itself will get as far as signing.
+///
+/// A lower bound where dust is concerned: change below the dust threshold is
+/// dropped to the miner rather than emitted, raising the fee actually paid.
+/// `TransparentTransactionResult::fee` reports the true figure.
 pub fn estimate_delegation_fee(
     wallet: &WalletData,
     staking_address: &str,
@@ -612,6 +630,12 @@ pub fn create_coldstake_withdrawal_with_change(
 
 /// Fee [`create_coldstake_withdrawal`] will charge for `input_count` delegated
 /// inputs.
+///
+/// This is a **lower bound**, not always the exact figure. If the withdrawal
+/// leaves change below the dust threshold, that change is dropped to the miner
+/// rather than emitted as an unrelayable output, and the fee actually paid rises
+/// by the dropped amount. The estimator cannot see that from the input count
+/// alone. `TransparentTransactionResult::fee` always reports the true figure.
 pub fn estimate_coldstake_withdrawal_fee(input_count: usize) -> u64 {
     fees::estimate_raw_transparent_fee_with_extra(input_count, 2, input_count)
 }

@@ -259,6 +259,12 @@ fn select_transparent_utxos(
 /// Errs for the same reasons the builder would — no recipients, a zero amount,
 /// an invalid or shield address, duplicate outpoints, or insufficient funds —
 /// so a successful estimate means the send itself will get as far as signing.
+///
+/// A lower bound where dust is concerned: change below the dust threshold is
+/// dropped to the miner rather than emitted as an output no node would relay,
+/// which raises the fee actually paid by the dropped amount. The estimator
+/// cannot know that before the outputs are resolved.
+/// `TransparentTransactionResult::fee` always reports the true figure.
 pub fn estimate_raw_transparent_fee_to_many(
     wallet: &WalletData,
     recipients: &[Recipient],
@@ -837,18 +843,16 @@ pub(crate) fn sign_and_serialize(
         let mut sig_bytes = sig.serialize_der().to_vec();
         sig_bytes.push(0x01); // SIGHASH_ALL
 
-        // P2PKH: <push sig> <sig> <push key> <key>. The cold-staking owner path
-        // inserts a single OP_FALSE between them.
-        let selector_len = usize::from(input.cold_stake_owner);
-        let script_sig_len = sig_bytes.len() + pubkey_bytes.len() + 2 + selector_len;
-        write_varint(&mut signed_tx, script_sig_len as u64);
-        signed_tx.push(sig_bytes.len() as u8);
-        signed_tx.extend_from_slice(&sig_bytes);
-        if input.cold_stake_owner {
-            signed_tx.push(0x00); // OP_FALSE — take the OP_ELSE (owner) branch
-        }
-        signed_tx.push(pubkey_bytes.len() as u8);
-        signed_tx.extend_from_slice(pubkey_bytes);
+        // Built by the same function the cold-staking module exposes, so there
+        // is one definition of the redeem-script layout rather than two that
+        // could drift.
+        let script_sig = if input.cold_stake_owner {
+            crate::transparent::coldstake::build_p2cs_owner_script_sig(&sig_bytes, pubkey_bytes)
+        } else {
+            crate::transparent::coldstake::build_p2pkh_script_sig(&sig_bytes, pubkey_bytes)
+        };
+        write_varint(&mut signed_tx, script_sig.len() as u64);
+        signed_tx.extend_from_slice(&script_sig);
 
         signed_tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
     }
