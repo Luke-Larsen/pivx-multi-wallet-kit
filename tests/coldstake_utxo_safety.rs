@@ -1,7 +1,7 @@
 //! Delegated outputs must never be spent as ordinary ones.
 //!
 //! A P2CS output is indexed under its *owner's* address, so an explorer lists it
-//! alongside ordinary UTXOs — verified against a live third-party delegation,
+//! alongside ordinary UTXOs: verified against a live third-party delegation,
 //! which appears in `/api/v2/utxo/<owner>` exactly like any other output. A
 //! wallet that refreshes its UTXO set after delegating therefore holds a mix,
 //! and selecting the delegated one for a plain send produces a transaction the
@@ -80,7 +80,7 @@ fn a_delegated_utxo_is_recognised() {
     assert!(is_delegated_utxo(&delegated("a", 0, 100)));
     assert!(!is_delegated_utxo(&ordinary("a", 0, 100)));
 
-    // An unknown script is treated as ordinary — the direction that preserves
+    // An unknown script is treated as ordinary: the direction that preserves
     // existing behaviour for consumers who never touch cold staking.
     let mut unknown = delegated("a", 0, 100);
     unknown.script = String::new();
@@ -114,7 +114,7 @@ fn balance_separates_spendable_from_delegated() {
 #[test]
 fn ordinary_sends_skip_delegated_outputs() {
     let mut w = wallet_with(vec![
-        delegated("d", 0, 300_000_000), // largest — selection would take it first
+        delegated("d", 0, 300_000_000), // largest: selection would take it first
         ordinary("e", 1, 50_000_000),
     ]);
 
@@ -130,7 +130,7 @@ fn ordinary_sends_skip_delegated_outputs() {
 }
 
 /// If only delegated funds remain, the error must say so rather than reporting a
-/// bare shortfall — the coins exist, they just need withdrawing first.
+/// bare shortfall: the coins exist, they just need withdrawing first.
 #[test]
 fn a_wholly_delegated_wallet_explains_itself() {
     let mut w = wallet_with(vec![delegated("d", 0, 300_000_000)]);
@@ -165,7 +165,7 @@ fn the_estimator_also_skips_delegated_outputs() {
 }
 
 /// The from-UTXOs path takes an explicit set, so a delegated entry is a caller
-/// error and must be reported rather than silently dropped — dropping it would
+/// error and must be reported rather than silently dropped: dropping it would
 /// build a transaction that does not match what was asked for.
 #[test]
 fn the_from_utxos_path_rejects_delegated_inputs() {
@@ -207,7 +207,7 @@ fn delegating_skips_already_delegated_outputs() {
 }
 
 /// Consumers who never populate `script` see exactly the behaviour they had
-/// before cold staking existed — the guard cannot help them, and must not
+/// before cold staking existed: the guard cannot help them, and must not
 /// change anything either.
 #[test]
 fn wallets_without_scripts_behave_as_before() {

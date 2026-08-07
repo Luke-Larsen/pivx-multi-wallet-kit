@@ -1,8 +1,8 @@
 //! Integration tests exercising the kit against real PIVX mainnet transactions.
 //!
 //! Fixtures in `tests/fixtures/` are raw tx hex pulled from Blockbook:
-//! - `tx_transparent.hex` — `c6ff49f9...` (shield → transparent, 1 sapling spend, 1 transparent output)
-//! - `tx_shield.hex`      — `69dc1691...` (pure shield, 1 spend + 2 outputs, ~0.024 PIV fee)
+//! - `tx_transparent.hex`: `c6ff49f9...` (shield → transparent, 1 sapling spend, 1 transparent output)
+//! - `tx_shield.hex`     : `69dc1691...` (pure shield, 1 spend + 2 outputs, ~0.024 PIV fee)
 //!
 //! These are *real* on-chain txs; they let us verify parsing, tree updates,
 //! and (where applicable) the full shield handling pipeline without needing
@@ -81,7 +81,7 @@ fn checkpoint_latest_is_reachable() {
 // Key derivation
 // ---------------------------------------------------------------------------
 
-/// BIP39 test vector — a known mnemonic whose transparent address we can verify derives consistently.
+/// BIP39 test vector: a known mnemonic whose transparent address we can verify derives consistently.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -94,7 +94,7 @@ fn derive_transparent_address_from_mnemonic() {
         addr
     );
     assert_eq!(addr.len(), 34, "PIVX address should be 34 chars, got: {}", addr.len());
-    // Deterministic — derive twice, expect identical.
+    // Deterministic: derive twice, expect identical.
     let addr2 = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     assert_eq!(addr, addr2);
 }
@@ -149,7 +149,7 @@ fn shield_address_at_zero_matches_default_address() {
 
 #[test]
 fn shield_address_at_is_deterministic() {
-    // Calling twice with the same input must yield the same output —
+    // Calling twice with the same input must yield the same output:
     // critical for any database that stores the address and later expects
     // to re-derive the spending key from the index.
     let extfvk = encoded_extfvk_for_test_mnemonic();
@@ -267,7 +267,7 @@ fn wallet_decrypt_wrong_key_does_not_corrupt_state() {
     let wrong_key = [0x99u8; 32];
     let _ = wallet::decrypt_secrets(&mut w, &wrong_key);
 
-    // State should be untouched — mnemonic still the encrypted hex string.
+    // State should be untouched: mnemonic still the encrypted hex string.
     assert_eq!(w.get_mnemonic(), encrypted_mnemonic);
 
     // Retry with the right key should now succeed cleanly.
@@ -414,7 +414,7 @@ fn parse_blockbook_utxos_handles_string_and_number_values() {
     assert_eq!(utxos[1].vout, 2);
 }
 
-/// Blockbook lists the same UTXO twice while a transaction is confirming —
+/// Blockbook lists the same UTXO twice while a transaction is confirming,
 /// once from its mempool view (height 0) and once as confirmed. Observed
 /// live on mainnet. Ingesting both doubles the apparent balance and makes the
 /// builder spend one outpoint twice, which the network rejects.
@@ -455,7 +455,7 @@ fn parse_blockbook_utxos_deduplicates_outpoints() {
 }
 
 /// Distinct vouts of the same txid are different outpoints and must both
-/// survive — the dedupe must key on (txid, vout), not txid alone.
+/// survive: the dedupe must key on (txid, vout), not txid alone.
 #[test]
 fn parse_blockbook_utxos_keeps_distinct_vouts_of_one_txid() {
     let txid = "a".repeat(64);
@@ -720,11 +720,11 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
 
     let tx_bytes = decode_fixture(TX_SHIELD_HEX);
 
-    // Derive a random extfvk from a throwaway mnemonic — guaranteed not to be
+    // Derive a random extfvk from a throwaway mnemonic: guaranteed not to be
     // the actual recipient of this tx.
     let random = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
 
-    // Start with the empty tree (just to exercise the path — the real tree
+    // Start with the empty tree (just to exercise the path: the real tree
     // would be one from just before this tx's block).
     let tree_hex = checkpoints::MAINNET_CHECKPOINTS[0].1;
     let block = sapling::sync::ShieldBlock {
@@ -740,7 +740,7 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
     // But the spend nullifier should have been surfaced.
     assert_eq!(result.nullifiers.len(), 1);
 
-    // Tree must advance by exactly 2 leaves — the tx has 2 shielded outputs.
+    // Tree must advance by exactly 2 leaves: the tx has 2 shielded outputs.
     let parse_tree = |hex: &str| -> u64 {
         let bytes = simd::hex::hex_string_to_bytes(hex);
         let tree: CommitmentTree<Node, 32> = read_commitment_tree(Cursor::new(bytes)).unwrap();
@@ -788,7 +788,7 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
 /// The kit must let consumers build pure transparent→transparent transactions
 /// without ever loading the Sapling prover. Enforced by this test, which
 /// constructs a wallet with a synthetic transparent UTXO and drives the raw
-/// v1 P2PKH path — if the kit ever accidentally re-requires a prover here,
+/// v1 P2PKH path, if the kit ever accidentally re-requires a prover here,
 /// this test will fail because we pass `None`.
 #[test]
 fn transparent_to_transparent_tx_needs_no_prover() {
@@ -809,7 +809,7 @@ fn transparent_to_transparent_tx_needs_no_prover() {
         ..Default::default()
     });
 
-    // Destination is the same wallet's transparent address — guaranteed to
+    // Destination is the same wallet's transparent address: guaranteed to
     // be a `D...` address, triggering the raw v1 path.
     let dest = w.get_transparent_address().unwrap();
 
@@ -818,8 +818,8 @@ fn transparent_to_transparent_tx_needs_no_prover() {
         &bip39_seed,
         &dest,
         100_000_000, // 1 PIV
-        0,           // block_height_for_shield — unused for transparent dest
-        None,        // prover_for_shield — unused for transparent dest
+        0,           // block_height_for_shield: unused for transparent dest
+        None,        // prover_for_shield: unused for transparent dest
     )
     .expect("pure transparent tx should build without prover");
 
@@ -843,7 +843,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let bip39_seed = mnemonic.to_seed("");
 
-    // Derive the address at HD index 5 — what a consumer that maintains
+    // Derive the address at HD index 5: what a consumer that maintains
     // multiple receive addresses would use as a source.
     let (from_addr, _pubkey, _privkey) =
         keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap();
@@ -913,7 +913,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         3,
         &utxos,
         &to,
-        // Pass total - fee so change is exactly 0 — the typical
+        // Pass total - fee so change is exactly 0: the typical
         // "send everything" path.
         100_000_000 - pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2),
     )
@@ -969,7 +969,7 @@ fn raw_transparent_from_utxos_insufficient_balance_fails() {
     assert!(err.is_err(), "should reject when UTXOs < amount + fee");
 }
 
-/// Small helper — finds a needle byte slice anywhere inside a haystack.
+/// Small helper: finds a needle byte slice anywhere inside a haystack.
 /// Avoids pulling in a crate just for this.
 fn windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > haystack.len() {
@@ -1094,7 +1094,7 @@ fn parse_shield_stream_rejects_unknown_type() {
 /// `unspent_notes` after the merge-and-finalize pass that the wasm
 /// wrapper performs (`Wallet::apply_blocks` in `src/wasm.rs`).
 ///
-/// `handle_blocks` itself does not filter spent own notes — it
+/// `handle_blocks` itself does not filter spent own notes: it
 /// returns `updated_notes` containing every input note (witnesses
 /// advanced) regardless of nullifier matches, and `nullifiers`
 /// containing every nullifier seen in the batch. The wasm wrapper
@@ -1147,7 +1147,7 @@ fn apply_blocks_sequence_filters_spent_own_notes() {
 /// malformed tx), the wasm wrapper's clone-then-pass strategy means
 /// `wallet.unspent_notes` is left untouched.
 ///
-/// Hands `handle_blocks` a tx with empty bytes — its first-byte tag
+/// Hands `handle_blocks` a tx with empty bytes: its first-byte tag
 /// read returns `None`, surfacing as `"empty tx bytes in shield block"`.
 /// The test mirrors the wasm wrapper's exact clone-and-call sequence
 /// and verifies the wallet's unspent_notes are byte-for-byte intact.
@@ -1169,7 +1169,7 @@ fn apply_blocks_error_path_preserves_state() {
 
     // Malformed input: empty tx bytes triggers the
     // "empty tx bytes in shield block" error inside handle_blocks
-    // *after* it consumes the existing-notes clone — exactly the
+    // *after* it consumes the existing-notes clone: exactly the
     // production failure mode the clone-defense protects against.
     let bad_block = pivx_wallet_kit::sapling::sync::ShieldBlock {
         height: 1,
@@ -1190,7 +1190,7 @@ fn apply_blocks_error_path_preserves_state() {
     );
     assert!(result.is_err(), "expected handle_blocks to error on empty tx bytes");
 
-    // The wrapper does NOT replace state on error — so the sentinel
+    // The wrapper does NOT replace state on error, so the sentinel
     // note must still be present unchanged. Without the clone-defense
     // (i.e., if mem::take were used), this would now be empty.
     assert_eq!(w.unspent_notes.len(), 1);

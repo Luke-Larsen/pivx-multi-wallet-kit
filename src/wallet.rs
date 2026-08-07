@@ -2,7 +2,7 @@
 //!
 //! Persistence (disk, IndexedDB, etc.) is the consumer's responsibility.
 //! This module owns the `WalletData` shape, note/UTXO tracking, checkpoint
-//! reset, and a symmetric stream cipher for on-disk secret encryption —
+//! reset, and a symmetric stream cipher for on-disk secret encryption,
 //! but never touches the filesystem.
 
 use crate::checkpoints;
@@ -89,7 +89,7 @@ impl SerializedUTXO {
 ///
 /// Requires the `script` field: a P2CS output is recognisable only from its
 /// script, and nothing else about the UTXO distinguishes it. An empty script
-/// means "unknown", and unknown is treated as ordinary — which is the direction
+/// means "unknown", and unknown is treated as ordinary, which is the direction
 /// that preserves existing behaviour, at the cost of the hazard documented on
 /// [`WalletData::get_transparent_balance`].
 pub fn is_delegated_utxo(utxo: &SerializedUTXO) -> bool {
@@ -171,8 +171,8 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
         }
 
         // Deduplicate by outpoint. Blockbook can list the same UTXO twice
-        // while a transaction is confirming — once from its mempool view
-        // (confirmations 0, height 0) and once as confirmed — and observed
+        // while a transaction is confirming, once from its mempool view
+        // (confirmations 0, height 0) and once as confirmed, and observed
         // responses do exactly that. Ingesting both doubles the apparent
         // balance and makes the builder select the same outpoint twice,
         // producing a transaction that spends one output twice. That is a
@@ -187,7 +187,7 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
             .iter_mut()
             .find(|e| e.vout == vout && e.txid == txid)
         {
-            // Prefer the confirmed sighting's height — the mempool copy
+            // Prefer the confirmed sighting's height: the mempool copy
             // reports 0, which would misrepresent the UTXO's age.
             existing.height = existing.height.max(height);
             // A caller joining scripts on may have covered only one of the two
@@ -272,7 +272,7 @@ impl WalletData {
     /// Derive the extended Sapling spending key on-the-fly from the
     /// stored seed.
     ///
-    /// Returns the typed key directly — callers that need to feed it
+    /// Returns the typed key directly: callers that need to feed it
     /// into the builder no longer pay an encode/decode round-trip on
     /// every shield send. For consumers that need the bech32 string
     /// form (persistence, RPC, display), use [`derive_extsk_encoded`].
@@ -298,8 +298,8 @@ impl WalletData {
     /// Spendable transparent balance, excluding anything delegated for cold
     /// staking.
     ///
-    /// A delegated output still belongs to this wallet — the owner key can
-    /// redeem it — but it cannot be spent by an ordinary P2PKH transaction, so
+    /// A delegated output still belongs to this wallet: the owner key can
+    /// redeem it, but it cannot be spent by an ordinary P2PKH transaction, so
     /// counting it here would report funds that no plain send can reach. Use
     /// [`WalletData::get_delegated_balance`] for the other half, and
     /// `withdrawColdStake` to move it.
@@ -366,7 +366,7 @@ impl WalletData {
     /// Returns `Err` if `self.mnemonic` is not a valid BIP39 phrase. The
     /// stored mnemonic is *expected* to be valid post-`decrypt_secrets`,
     /// but this method is safe to call before decryption (it'll just
-    /// fail) — useful for early lifecycle paths where the wallet may
+    /// fail): useful for early lifecycle paths where the wallet may
     /// still be sealed.
     ///
     /// The returned bytes are wrapped in [`Zeroizing`] so they wipe
@@ -499,7 +499,7 @@ pub fn reset_to_checkpoint(data: &mut WalletData) -> Result<(), Box<dyn Error>> 
 // consumer's responsibility (in native CLIs, typically derived from the
 // machine ID; in browsers, from user-supplied passphrase material).
 
-/// SHA256-CTR stream cipher — XORs `data` with a keystream derived from `key`.
+/// SHA256-CTR stream cipher: XORs `data` with a keystream derived from `key`.
 ///
 /// Symmetric: the same function encrypts and decrypts.
 #[inline]
@@ -543,7 +543,7 @@ pub fn encrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
 /// pretty-printed JSON string, ready to be persisted.
 ///
 /// Prefer this over calling [`encrypt_secrets`] + `serde_json::to_string_pretty`
-/// by hand — it clones the wallet via [`WalletData::clone_for_encryption`] first,
+/// by hand: it clones the wallet via [`WalletData::clone_for_encryption`] first,
 /// so encryption never mutates the live in-memory plaintext wallet, and it
 /// never passes an unencrypted `WalletData` through `serde_json`'s internal
 /// buffers.
@@ -566,7 +566,7 @@ pub fn deserialize_encrypted(json: &str, key: &[u8; 32]) -> Result<WalletData, B
 /// Decrypt `seed` and `mnemonic` in place after deserialization.
 ///
 /// Validates the decryption by re-deriving the extfvk and comparing against
-/// the stored value — a wrong key surfaces as an error rather than silently
+/// the stored value: a wrong key surfaces as an error rather than silently
 /// producing garbage.
 ///
 /// On any error the wallet's on-disk ciphertext is left untouched; only
@@ -584,7 +584,7 @@ pub fn decrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
         Ok(s) => s,
         Err(_) => {
             candidate_seed.zeroize();
-            return Err("Failed to decrypt wallet — wrong key?".into());
+            return Err("Failed to decrypt wallet: wrong key?".into());
         }
     };
 
@@ -599,7 +599,7 @@ pub fn decrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
     let derived_extfvk = keys::encode_extfvk(&keys::full_viewing_key(&extsk));
     if derived_extfvk != data.extfvk {
         candidate_seed.zeroize();
-        return Err("Failed to decrypt wallet — wrong key or corrupted data.".into());
+        return Err("Failed to decrypt wallet: wrong key or corrupted data.".into());
     }
 
     // Commit.

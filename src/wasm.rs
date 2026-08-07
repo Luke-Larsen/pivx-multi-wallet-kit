@@ -1,16 +1,16 @@
-//! WASM bindings — class-style API for JS/TS consumers.
+//! WASM bindings: class-style API for JS/TS consumers.
 //!
 //! Surface:
 //!
-//!   - `Wallet` — owns the wallet state and secret material.
-//!   - `SaplingParams` — holds the verified Groth16 proving keys.
-//!   - `Mnemonic` — static namespace for BIP39 helpers.
-//!   - `Fee` — static namespace for stateless fee math.
+//!   - `Wallet`: owns the wallet state and secret material.
+//!   - `SaplingParams`: holds the verified Groth16 proving keys.
+//!   - `Mnemonic`: static namespace for BIP39 helpers.
+//!   - `Fee`: static namespace for stateless fee math.
 //!   - free `verify_message`, `parse_*`, `format_*`, `get_*` for
 //!     pure stateless ops that don't fit any of the above.
 //!
 //! Native consumers use the underlying modules (`pivx_wallet_kit::wallet`,
-//! `pivx_wallet_kit::keys`, etc.) directly — this module is a thin
+//! `pivx_wallet_kit::keys`, etc.) directly: this module is a thin
 //! adapter that handles JsValue / serde / wasm-bindgen wiring.
 
 use crate::sapling::builder::TransactionResult;
@@ -78,7 +78,7 @@ impl Mnemonic {
         bip39::Mnemonic::parse_normalized(phrase).is_ok()
     }
 
-    /// Derive the 64-byte BIP39 seed. Niche — most consumers should
+    /// Derive the 64-byte BIP39 seed. Niche: most consumers should
     /// not need this; prefer constructing a `Wallet` from the
     /// mnemonic directly. Returned bytes are the caller's
     /// responsibility to wipe (no Zeroizing wrapper survives the
@@ -96,14 +96,14 @@ impl Mnemonic {
 
 /// Stateless fee math. Use these when you're not building through a
 /// `Wallet` and want to size a hypothetical tx by component counts.
-/// For "what would `wallet.send*` actually charge?" — see
+/// For "what would `wallet.send*` actually charge?": see
 /// `Wallet.estimateSend{Shield,Transparent}Fee` instead.
 #[wasm_bindgen]
 pub struct Fee;
 
 #[wasm_bindgen]
 impl Fee {
-    /// PIVX v3 (Sapling-bundle) tx fee — for any tx that touches
+    /// PIVX v3 (Sapling-bundle) tx fee: for any tx that touches
     /// shield: shield→shield, shield→transparent, transparent→shield.
     #[wasm_bindgen(js_name = shieldTx)]
     pub fn shield_tx(
@@ -120,7 +120,7 @@ impl Fee {
         )
     }
 
-    /// PIVX v1 (raw P2PKH) tx fee — for pure transparent → transparent.
+    /// PIVX v1 (raw P2PKH) tx fee: for pure transparent → transparent.
     #[wasm_bindgen(js_name = transparentTx)]
     pub fn transparent_tx(inputs: u64, outputs: u64) -> u64 {
         crate::fees::estimate_raw_transparent_fee(inputs as usize, outputs as usize)
@@ -134,7 +134,7 @@ impl Fee {
 /// Loaded Groth16 proving parameters. Construct **once** per session
 /// (after sourcing the bytes from cache or a CDN), then pass into
 /// `Wallet.sendShield` / `Wallet.sendTransparent` as needed. Each
-/// instance carries the full proving keys (~50MB) — do NOT load
+/// instance carries the full proving keys (~50MB): do NOT load
 /// multiple instances in parallel.
 #[wasm_bindgen]
 pub struct SaplingParams {
@@ -209,7 +209,7 @@ impl Wallet {
 
     /// **DANGER: PLAINTEXT.** Returns a JSON string containing the
     /// wallet's seed and mnemonic in cleartext. Only useful for
-    /// testnet / debug / cross-implementation testing — NEVER persist
+    /// testnet / debug / cross-implementation testing: NEVER persist
     /// the output of this method to disk or send it over the wire.
     /// Use [`Wallet::toSerializedEncrypted`] for production persistence.
     ///
@@ -233,7 +233,7 @@ impl Wallet {
     }
 
     /// Decrypt a wallet that was loaded from `fromSerialized` of an
-    /// encrypted blob. Errs cleanly on wrong key — the wallet stays
+    /// encrypted blob. Errs cleanly on wrong key: the wallet stays
     /// LOCKED, no partial state. Idempotent if already unlocked.
     #[wasm_bindgen(js_name = unlock)]
     pub fn unlock(&mut self, key: &[u8]) -> Result<(), JsError> {
@@ -274,12 +274,12 @@ impl Wallet {
     }
 
     /// Derive a fresh shield address at the given diversifier index.
-    /// Returns `{ index, address }` — `index` may be greater than the
+    /// Returns `{ index, address }`: `index` may be greater than the
     /// caller-supplied `startIndex` because invalid diversifiers are
     /// skipped. Callers track their own cursor and pass `last_used + 1`
     /// to get the next valid address.
     ///
-    /// All addresses returned share the same spending key — the wallet
+    /// All addresses returned share the same spending key: the wallet
     /// sees one balance even if a thousand invoice-specific addresses
     /// are derived.
     #[wasm_bindgen(js_name = shieldAddressAt)]
@@ -307,7 +307,7 @@ impl Wallet {
     ///
     /// Only counts UTXOs whose `script` is populated and parses as P2CS.
     /// Blockbook's UTXO endpoint omits scripts, and `parseBlockbookUtxos` leaves
-    /// the field empty — so a consumer using cold staking must populate `script`
+    /// the field empty, so a consumer using cold staking must populate `script`
     /// for delegated outputs, or they will be counted as spendable and selected
     /// by ordinary sends, which the network then rejects.
     /// Value in coinstake/coinbase outputs that exist but have not matured, so
@@ -363,13 +363,13 @@ impl Wallet {
 
     // ─── Sync ───────────────────────────────────────────────────
 
-    /// Apply parsed shield blocks to the wallet — decrypts notes
+    /// Apply parsed shield blocks to the wallet: decrypts notes
     /// belonging to this wallet, advances the commitment tree,
     /// extracts nullifiers (potential spends of our notes), and
     /// removes any of our own notes that were spent in this batch.
     /// Returns the deltas; the wallet is mutated in place.
     ///
-    /// On error the wallet's note set is left untouched — the caller
+    /// On error the wallet's note set is left untouched: the caller
     /// can retry with the same or a different block batch without
     /// reloading from disk.
     #[wasm_bindgen(js_name = applyBlocks)]
@@ -431,7 +431,7 @@ impl Wallet {
     /// Build one shield-source transaction paying multiple recipients.
     ///
     /// Unlike `sendTransparentToMany`, recipients may mix shield (`ps1...`)
-    /// and transparent (`D...`) addresses in the same transaction — the funds
+    /// and transparent (`D...`) addresses in the same transaction: the funds
     /// come from shield notes either way. Each shield recipient may carry its
     /// own `memo`; a memo on a transparent recipient is an error rather than
     /// being silently dropped, since PIVX has nowhere to put it.
@@ -573,7 +573,7 @@ impl Wallet {
     /// Each UTXO's `script` field **must** carry the hex `scriptPubKey` of the
     /// delegated output. That is not optional: the signature commits to the exact
     /// script, so it cannot be inferred, and `parseBlockbookUtxos` leaves the
-    /// field empty — fetch it from your explorer alongside the outpoint. Use
+    /// field empty: fetch it from your explorer alongside the outpoint. Use
     /// `inspectColdStakeScript` to confirm a script is a delegation this wallet
     /// owns before passing it in.
     ///
@@ -582,8 +582,8 @@ impl Wallet {
     /// network would refuse.
     ///
     /// **Refresh your UTXO set immediately before calling this.** A delegated
-    /// output can be consumed by the staking node at any time — that is what
-    /// staking is — which spends the outpoint and recreates the delegation at a
+    /// output can be consumed by the staking node at any time: that is what
+    /// staking is, which spends the outpoint and recreates the delegation at a
     /// new one. Consensus forbids the staker from moving, redirecting or
     /// reducing the coins, so nothing is at risk and the delegation survives
     /// with the same owner; but a withdrawal built against a stale
@@ -614,14 +614,14 @@ impl Wallet {
     /// Withdraw part of a delegation and keep the remainder staked.
     ///
     /// A withdrawal spends its inputs whole, so anything not withdrawn comes
-    /// back as change — and ordinary change stops staking. Pass the staking
+    /// back as change, and ordinary change stops staking. Pass the staking
     /// address to re-delegate that change instead, which is what someone
     /// withdrawing 4,000 of their 10,000 usually expects.
     ///
     /// `changeStakingAddress` may differ from the delegation being spent, which
     /// moves the remainder to a different staking node in one transaction.
-    /// Change below 1 PIV cannot be delegated — the reference wallets will not
-    /// create a smaller delegation — and comes back plain instead.
+    /// Change below 1 PIV cannot be delegated: the reference wallets will not
+    /// create a smaller delegation, and comes back plain instead.
     ///
     /// Inputs you do not supply are untouched and keep staking regardless.
     ///
@@ -701,7 +701,7 @@ impl Wallet {
         self.ensure_unlocked()?;
         if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
             return Err(JsError::new(
-                "to_address is a shield address — use sendTransparentToShield instead",
+                "to_address is a shield address: use sendTransparentToShield instead",
             ));
         }
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
@@ -732,7 +732,7 @@ impl Wallet {
     ///
     /// All recipients must be transparent (`D...`) addresses. Shield
     /// destinations need a Sapling prover and cannot be mixed into this
-    /// transaction — use `sendTransparentToShield` for those.
+    /// transaction: use `sendTransparentToShield` for those.
     #[wasm_bindgen(js_name = sendTransparentToMany)]
     pub fn send_transparent_to_many(
         &mut self,
@@ -752,7 +752,7 @@ impl Wallet {
     ///
     /// Counterpart to `estimateSendShieldFeeToMany`. Runs the same selection
     /// and the same fee model the builder will, so the returned fee is what
-    /// `sendTransparentToMany` charges for the same recipient list — including
+    /// `sendTransparentToMany` charges for the same recipient list, including
     /// the fact that the fee grows with the number of inputs selection has to
     /// reach for.
     ///
@@ -774,7 +774,7 @@ impl Wallet {
     /// caller-supplied UTXOs from a specific HD slot across several
     /// transparent recipients.
     ///
-    /// Every supplied UTXO is spent — no selection is applied. Pass recipient
+    /// Every supplied UTXO is spent: no selection is applied. Pass recipient
     /// amounts summing to `totalUtxoValue - estimatedFee` to produce a tx with
     /// no change output.
     #[wasm_bindgen(js_name = sendTransparentFromUtxosToMany)]
@@ -803,7 +803,7 @@ impl Wallet {
     /// Distinct from `sendTransparentToTransparent` in two ways:
     /// the caller picks the signing key by HD path
     /// (`m/44'/119'/0'/fromChange/fromIndex`), and the caller hands in
-    /// exactly the UTXOs to spend — `WalletData.unspent_utxos` is not
+    /// exactly the UTXOs to spend: `WalletData.unspent_utxos` is not
     /// touched. Useful for consumers that maintain multiple receive
     /// addresses (payment processors with one address per invoice,
     /// hierarchical-deterministic accounting, custom sweep flows).
@@ -848,7 +848,7 @@ impl Wallet {
         self.ensure_unlocked()?;
         if !to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
             return Err(JsError::new(
-                "to_address is not a shield address — use sendTransparentToTransparent instead",
+                "to_address is not a shield address: use sendTransparentToTransparent instead",
             ));
         }
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
@@ -960,7 +960,7 @@ impl Wallet {
     fn ensure_unlocked(&self) -> Result<(), JsError> {
         if self.locked {
             return Err(JsError::new(
-                "wallet is locked — call unlock(key) first",
+                "wallet is locked: call unlock(key) first",
             ));
         }
         Ok(())

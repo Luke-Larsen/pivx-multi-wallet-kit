@@ -5,7 +5,7 @@
 //! (the latter requires a Sapling prover).
 //!
 //! `create_raw_transparent_transaction` bypasses the v3 builder and produces
-//! a raw v1 P2PKH transaction — needed because PIVX nodes reject v3 txs
+//! a raw v1 P2PKH transaction: needed because PIVX nodes reject v3 txs
 //! that don't carry Sapling data.
 
 use crate::fees;
@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use zcash_transparent::bundle::OutPoint;
 
-/// A reference to a UTXO that was consumed by a transparent send —
+/// A reference to a UTXO that was consumed by a transparent send:
 /// the (txid, vout) pair the wallet uses to mark its UTXO set after
 /// broadcast. Named-field struct so generated TS bindings get
 /// `{txid: string, vout: number}[]` instead of `[string, number][]`.
@@ -42,7 +42,7 @@ pub struct SpentOutpoint {
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct TransparentTransactionResult {
     pub txhex: String,
-    /// UTXOs consumed by this tx — remove from the wallet after broadcast
+    /// UTXOs consumed by this tx: remove from the wallet after broadcast
     /// via [`crate::wallet::WalletData::finalize_transparent_send`].
     pub spent: Vec<SpentOutpoint>,
     /// Total paid to recipients, excluding change and fee. For a
@@ -67,7 +67,7 @@ pub struct Recipient {
 /// Resolving recipients into this shape *once* is what keeps the signature
 /// honest. The signed preimage and the emitted transaction are both produced
 /// from the same `&[TxOutput]` by [`write_outputs`], so the two cannot drift
-/// apart — which was a live hazard while the output shape was open-coded
+/// apart, which was a live hazard while the output shape was open-coded
 /// separately in `compute_sighash` and in each builder's writer.
 #[derive(Clone, Debug)]
 pub(crate) struct TxOutput {
@@ -78,7 +78,7 @@ pub(crate) struct TxOutput {
 /// Serialize an output list in consensus form: count, then `value ||
 /// script_len || script` per output.
 ///
-/// Single source of truth for output bytes — used by both the sighash
+/// Single source of truth for output bytes: used by both the sighash
 /// preimage and the final transaction body. Do not inline this.
 pub(crate) fn write_outputs(buf: &mut Vec<u8>, outputs: &[TxOutput]) {
     write_varint(buf, outputs.len() as u64);
@@ -166,7 +166,7 @@ struct TransparentSelection {
 ///
 /// Shared by [`create_raw_transparent_transaction_to_many`] and
 /// [`estimate_raw_transparent_fee_to_many`], because the fee depends on how
-/// many inputs selection ends up reaching for — so an estimator that did its
+/// many inputs selection ends up reaching for, so an estimator that did its
 /// own selection could quote a different fee than the builder charges.
 fn select_transparent_utxos(
     wallet: &WalletData,
@@ -178,7 +178,7 @@ fn select_transparent_utxos(
     for r in recipients {
         if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
             return Err(format!(
-                "Shield recipient {} is not supported in a multi-recipient transparent send — \
+                "Shield recipient {} is not supported in a multi-recipient transparent send: \
                  use create_shielding_transaction for shield destinations",
                 r.address
             )
@@ -228,7 +228,7 @@ fn select_transparent_utxos(
 
     // Output count for the fee model: recipients plus a possible change
     // output. Assuming change up front can only over-estimate the fee, which
-    // is the safe direction — under-estimating strands the tx unconfirmed.
+    // is the safe direction: under-estimating strands the tx unconfirmed.
     let fee_output_count = recipients.len() + 1;
 
     let mut selected: Vec<SerializedUTXO> = Vec::new();
@@ -237,11 +237,11 @@ fn select_transparent_utxos(
     for utxo in &utxos {
         selected.push(utxo.clone());
         // checked_add: see the matching guard in
-        // create_shielding_transaction — UTXOs come from explorers,
+        // create_shielding_transaction: UTXOs come from explorers,
         // not internal code, so we can't trust their values to fit.
         total = total
             .checked_add(utxo.amount)
-            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
+            .ok_or("UTXO total overflow: explorer returned malformed amounts")?;
         let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
         if total >= amount.saturating_add(fee) {
             break;
@@ -266,8 +266,8 @@ fn select_transparent_utxos(
 /// Fee that [`create_raw_transparent_transaction_to_many`] will charge for
 /// `recipients` against the wallet's current UTXO set.
 ///
-/// Errs for the same reasons the builder would — no recipients, a zero amount,
-/// an invalid or shield address, duplicate outpoints, or insufficient funds —
+/// Errs for the same reasons the builder would: no recipients, a zero amount,
+/// an invalid or shield address, duplicate outpoints, or insufficient funds,
 /// so a successful estimate means the send itself will get as far as signing.
 ///
 /// A lower bound where dust is concerned: change below the dust threshold is
@@ -286,7 +286,7 @@ pub fn estimate_raw_transparent_fee_to_many(
 ///
 /// An outpoint can only be spent once. A set containing a duplicate makes the
 /// wallet believe it holds twice the funds it does, and produces a transaction
-/// that spends one output twice — which the network rejects outright.
+/// that spends one output twice, which the network rejects outright.
 ///
 /// [`crate::wallet::parse_blockbook_utxos`] already collapses duplicates,
 /// because explorers really do emit them mid-confirmation. This guard covers
@@ -295,7 +295,7 @@ pub fn estimate_raw_transparent_fee_to_many(
 ///
 /// Erroring rather than silently deduplicating is deliberate here. When a
 /// caller supplies the set explicitly, a duplicate means their own accounting
-/// is wrong — they have almost certainly computed recipient amounts against the
+/// is wrong: they have almost certainly computed recipient amounts against the
 /// doubled total. Quietly halving their inputs would build a transaction that
 /// does not match what they asked for.
 pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
@@ -305,7 +305,7 @@ pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(),
             .any(|prev| prev.vout == u.vout && prev.txid == u.txid)
         {
             return Err(format!(
-                "Duplicate UTXO {}:{} in the input set — an outpoint cannot be spent twice",
+                "Duplicate UTXO {}:{} in the input set: an outpoint cannot be spent twice",
                 u.txid, u.vout
             )
             .into());
@@ -316,11 +316,11 @@ pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(),
 
 /// Build and sign a shielding transaction: transparent inputs → shield output(s).
 ///
-/// This is the only path through the v3 builder — pure transparent→transparent
+/// This is the only path through the v3 builder: pure transparent→transparent
 /// sends take the raw v1 P2PKH path (see [`create_raw_transparent_transaction`])
 /// because PIVX nodes reject v3 txs with no Sapling data.
 ///
-/// The caller must supply a loaded Sapling prover — the tx carries a real
+/// The caller must supply a loaded Sapling prover: the tx carries a real
 /// Sapling output bundle, so Groth16 proofs are mandatory.
 ///
 /// Returns an error if `to_address` is a transparent address; such calls
@@ -409,7 +409,7 @@ pub fn create_shielding_transaction(
         // or a release-build silent wrap to a small balance.
         total = total
             .checked_add(utxo.amount)
-            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
+            .ok_or("UTXO total overflow: explorer returned malformed amounts")?;
         fee = fees::estimate_fee(
             selected.len() as u64,
             transparent_output_count,
@@ -507,11 +507,11 @@ pub fn create_shielding_transaction(
     })
 }
 
-/// Build a signed transparent transaction — canonical entry for any spend
+/// Build a signed transparent transaction: canonical entry for any spend
 /// from transparent UTXOs.
 ///
 /// For transparent destinations (`D...`): produces a raw v1 P2PKH transaction
-/// signed with ECDSA / SIGHASH_ALL. No Sapling machinery is touched —
+/// signed with ECDSA / SIGHASH_ALL. No Sapling machinery is touched:
 /// `block_height_for_shield` and `prover_for_shield` are ignored. Consumers
 /// can pass `0` and `None`.
 ///
@@ -559,7 +559,7 @@ pub fn create_raw_transparent_transaction(
 /// returning to the wallet's own address as a final change output.
 ///
 /// Transparent destinations only. Shield outputs need the v3 builder and a
-/// Sapling prover, and mixing the two in one transaction is not supported —
+/// Sapling prover, and mixing the two in one transaction is not supported:
 /// see [`create_shielding_transaction`].
 ///
 /// `TransparentTransactionResult::amount` is the sum paid to recipients,
@@ -651,7 +651,7 @@ pub fn create_raw_transparent_transaction_from_utxos(
 /// spends a caller-supplied UTXO set from a specific HD slot across any number
 /// of transparent recipients.
 ///
-/// Every supplied UTXO is spent — no selection is applied. Recipients are paid
+/// Every supplied UTXO is spent: no selection is applied. Recipients are paid
 /// in the order given; any remainder after fee returns to the *source* address
 /// as a final change output. Pass recipient amounts summing to `total - fee` to
 /// get no change output at all.
@@ -672,7 +672,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     // straight into the transaction as a double-spend.
     reject_duplicate_outpoints(utxos)?;
 
-    // A delegated output cannot be spent by this path — it is P2CS, and signing
+    // A delegated output cannot be spent by this path: it is P2CS, and signing
     // it against a P2PKH preimage yields a transaction the network rejects.
     // Erroring rather than skipping, because the caller named this exact set and
     // silently dropping one would produce a transaction that does not match what
@@ -681,7 +681,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
         if crate::wallet::is_delegated_utxo(u) {
             return Err(format!(
                 "UTXO {}:{} is delegated for cold staking and cannot be spent as an ordinary \
-                 output — use create_coldstake_withdrawal to redeem it",
+                 output: use create_coldstake_withdrawal to redeem it",
                 u.txid, u.vout
             )
             .into());
@@ -719,11 +719,11 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
         keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
     let own_script = keys::address_to_p2pkh_script(&own_address)?;
 
-    // Sum all provided UTXOs — every one of them gets spent. Refund
+    // Sum all provided UTXOs: every one of them gets spent. Refund
     // addresses are single-use so there's nothing to leave behind.
     let total: u64 = utxos.iter().try_fold(0u64, |acc, u| {
         acc.checked_add(u.amount)
-            .ok_or("UTXO total overflow — caller passed malformed amounts")
+            .ok_or("UTXO total overflow: caller passed malformed amounts")
     })?;
 
     // Fee assumes a change output; if it turns out to be zero the tx is
@@ -771,7 +771,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
 ///
 /// Takes the already-resolved output list rather than a destination/change
 /// pair, so the preimage commits to exactly the bytes [`write_outputs`] will
-/// emit into the transaction body — however many outputs there are.
+/// emit into the transaction body: however many outputs there are.
 fn compute_sighash(
     inputs: &[SigningInput],
     signing_index: usize,
@@ -787,7 +787,7 @@ fn compute_sighash(
         preimage.extend_from_slice(&txid_bytes);
         preimage.extend_from_slice(&input.utxo.vout.to_le_bytes());
 
-        // The input being signed commits to the scriptPubKey it is spending —
+        // The input being signed commits to the scriptPubKey it is spending,
         // which for a delegated output is the 51-byte P2CS script, not a P2PKH
         // one. Every other input contributes an empty script.
         if i == signing_index {
@@ -847,7 +847,7 @@ impl SigningInput {
 
 /// Sign every input and emit the finished v1 transaction body.
 ///
-/// Shared by all the raw transparent builders — they differ in how they pick
+/// Shared by all the raw transparent builders: they differ in how they pick
 /// inputs and outputs, not in how a signed transaction is laid out. Keeping the
 /// signing loop in one place means the sighash and the serialized body are
 /// always produced from the same `outputs` slice.

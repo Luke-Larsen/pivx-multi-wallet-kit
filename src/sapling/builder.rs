@@ -1,4 +1,4 @@
-//! Shielded transaction builder — spend notes, produce signed v3 tx hex.
+//! Shielded transaction builder: spend notes, produce signed v3 tx hex.
 
 use crate::fees;
 use crate::keys::{self, GenericAddress};
@@ -37,7 +37,7 @@ pub struct ShieldSelection {
 
 /// Pick which shield notes to spend.
 ///
-/// Selection order is **non-memo first, then ascending value** —
+/// Selection order is **non-memo first, then ascending value**:
 /// matches `create_shield_transaction`'s spend order. The estimator
 /// (`Wallet.estimateSendShieldFee`) uses the same function, so a
 /// fee returned by the estimator is the fee a follow-up
@@ -93,7 +93,7 @@ pub fn select_shield_notes(
 /// One recipient of a shield-sourced send.
 ///
 /// `address` may be either a shield (`ps1...`) or transparent (`D...`)
-/// address — a single transaction can pay a mix of both, since the funds come
+/// address: a single transaction can pay a mix of both, since the funds come
 /// from shield notes either way.
 ///
 /// `memo` is only meaningful for shield destinations; PIVX has nowhere to put
@@ -115,7 +115,7 @@ struct ResolvedShieldOutputs {
     /// `(address, amount, encoded memo)` in caller order.
     ///
     /// Memos are encoded here rather than in the builder so that a memo which
-    /// cannot be encoded is rejected at resolution time — which means the fee
+    /// cannot be encoded is rejected at resolution time, which means the fee
     /// estimator rejects it too, instead of quoting a fee for a send that would
     /// later fail to build.
     outputs: Vec<(GenericAddress, u64, MemoBytes)>,
@@ -180,7 +180,7 @@ fn resolve_shield_recipients(
             GenericAddress::Transparent(_) => {
                 if !r.memo.is_empty() {
                     return Err(format!(
-                        "Recipient {} is transparent but carries a memo — transparent outputs \
+                        "Recipient {} is transparent but carries a memo: transparent outputs \
                          cannot hold memos",
                         r.address
                     )
@@ -262,7 +262,7 @@ pub fn create_shield_transaction(
 /// notes across any number of destinations in one transaction.
 ///
 /// Recipients may mix shield (`ps1...`) and transparent (`D...`) addresses
-/// freely — the funds come from shield notes either way, so unlike the
+/// freely: the funds come from shield notes either way, so unlike the
 /// transparent builders there is no need to split the send. Each shield
 /// recipient may carry its own memo.
 ///
@@ -286,7 +286,7 @@ pub fn create_shield_transaction_to_many(
     let amount = resolved.total_amount;
 
     // Single source of truth for which notes to spend and what fee
-    // to charge — shared with `Wallet.estimateSendShieldFee` so the
+    // to charge: shared with `Wallet.estimateSendShieldFee` so the
     // estimator and the builder never disagree.
     let selection = select_shield_notes(
         &wallet.unspent_notes,
@@ -346,7 +346,7 @@ pub fn create_shield_transaction_to_many(
     }
 
     // `select_shield_notes` guarantees total >= amount + fee, so this cannot
-    // underflow — but it is subtraction on caller-influenced values, so keep
+    // underflow, but it is subtraction on caller-influenced values, so keep
     // it checked rather than relying on that invariant holding forever.
     let change_amount = total
         .checked_sub(amount)
@@ -424,7 +424,7 @@ mod tests {
     use crate::wallet::SerializedNote;
 
     /// Build a SerializedNote whose JSON `note` field carries the given
-    /// `value`. The other fields are placeholders — `select_shield_notes`
+    /// `value`. The other fields are placeholders: `select_shield_notes`
     /// only reads `note["value"]` and `memo`, so this is sufficient.
     fn note(value: u64, memo: Option<&str>) -> SerializedNote {
         SerializedNote {
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn insufficient_balance_returns_error() {
         let notes = vec![note(50, None), note(30, None)];
-        // 80 sat available, requesting 1000 — fee ~2 KB at 1000 sat/byte
+        // 80 sat available, requesting 1000: fee ~2 KB at 1000 sat/byte
         // dwarfs balance regardless of selection.
         let result = select_shield_notes(&notes, 1000, 0, 2);
         assert!(result.is_err());

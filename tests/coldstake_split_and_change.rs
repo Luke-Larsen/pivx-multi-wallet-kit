@@ -7,7 +7,7 @@
 //!   single staking unit where twenty compete independently. MyPIVXWallet splits
 //!   on a 500 PIV boundary; this reproduces its arithmetic.
 //! * A withdrawal spends its inputs whole, so the part not withdrawn comes back
-//!   as change. Plain change is an ordinary output — it stops staking. Someone
+//!   as change. Plain change is an ordinary output: it stops staking. Someone
 //!   withdrawing 4,000 of their 10,000 does not expect the other 6,000 to go
 //!   idle.
 
@@ -111,7 +111,7 @@ fn split_matches_mypivxwallet_arithmetic() {
     assert!(pieces.iter().all(|&p| p >= t), "no piece may fall below the target");
 }
 
-/// Whatever the amount, the pieces must sum back to it exactly — a split that
+/// Whatever the amount, the pieces must sum back to it exactly: a split that
 /// loses or invents satoshis would silently change what the user delegated.
 #[test]
 fn split_always_conserves_the_total() {
@@ -206,7 +206,7 @@ fn plain_change_stops_staking_the_remainder() {
     assert!(!is_p2cs(&outs[0].1), "the withdrawn amount is an ordinary output");
     assert!(
         !is_p2cs(&outs[1].1),
-        "plain change must not be a delegation — this is the behaviour Delegate() exists to change"
+        "plain change must not be a delegation: this is the behaviour Delegate() exists to change"
     );
     assert!(outs[1].0 > 5_999 * COIN, "roughly 6,000 PIV of change");
 }
@@ -238,8 +238,8 @@ fn delegated_change_keeps_the_remainder_staked() {
     assert_eq!(10_000 * COIN - outs.iter().map(|(v, _)| v).sum::<u64>(), result.fee);
 }
 
-/// Change below the delegation minimum cannot be re-delegated — the reference
-/// wallets will not create a sub-1-PIV delegation — so it falls back to plain
+/// Change below the delegation minimum cannot be re-delegated: the reference
+/// wallets will not create a sub-1-PIV delegation, so it falls back to plain
 /// rather than erroring.
 #[test]
 fn change_below_the_minimum_falls_back_to_plain() {
@@ -266,7 +266,7 @@ fn change_below_the_minimum_falls_back_to_plain() {
     assert!(outs[1].0 < MIN_COLDSTAKING_AMOUNT);
 }
 
-/// Inputs that were never supplied are untouched and keep staking — the part of
+/// Inputs that were never supplied are untouched and keep staking: the part of
 /// the answer that depends on UTXO structure rather than change policy.
 #[test]
 fn unspent_delegations_are_untouched() {
@@ -319,7 +319,7 @@ fn delegated_change_validates_the_staking_address() {
 }
 
 /// Change may be re-delegated to a *different* staker than the one being
-/// withdrawn from — moving a delegation between nodes in one transaction.
+/// withdrawn from: moving a delegation between nodes in one transaction.
 #[test]
 fn change_can_be_delegated_to_a_different_staker() {
     let delegated = vec![delegated_utxo("d", 0, 10_000 * COIN)];

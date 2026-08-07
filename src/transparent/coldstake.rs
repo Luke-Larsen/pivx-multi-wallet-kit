@@ -9,20 +9,20 @@
 //!
 //! Every constant and offset below was verified byte-for-byte against two
 //! independent sources rather than reconstructed from memory, because a wrong
-//! script here does not fail loudly — it produces an output that is either
+//! script here does not fail loudly: it produces an output that is either
 //! unspendable or spendable by the wrong party.
 //!
-//! * **PIVX Core** — `src/script/standard.cpp`
+//! * **PIVX Core**: `src/script/standard.cpp`
 //!   (`GetScriptForStakeDelegation`, `GetScriptForStakeDelegationLOF`,
 //!   `MatchPayToColdStaking`), `src/script/script.cpp`
 //!   (`CScript::IsPayToColdStaking`), `src/script/script.h` (opcode values),
 //!   `src/chainparams.cpp` (address prefixes, upgrade heights).
-//! * **MyPIVXWallet** — `scripts/script.js` (`isP2CS`, `getAddressFromHash`),
+//! * **MyPIVXWallet**: `scripts/script.js` (`isP2CS`, `getAddressFromHash`),
 //!   `scripts/transaction_builder.js` (`addColdStakeOutput`),
 //!   `scripts/transaction.js` (`signInput`).
 //!
 //! Note that MyPIVXWallet's `OWNER_START_INDEX` / `COLD_START_INDEX` constants
-//! are named the opposite way round to what they hold — index 6 is rendered as
+//! are named the opposite way round to what they hold: index 6 is rendered as
 //! a `coldaddress` (staking, `S...`) and index 28 as a `pubkeyhash` (owner,
 //! `D...`). The offsets here follow Core's `MatchPayToColdStaking`, which is
 //! unambiguous.
@@ -41,7 +41,7 @@ use std::error::Error;
 ///
 /// Defined as `MIN_COLDSTAKING_AMOUNT` in PIVX Core's `consensus/consensus.h`,
 /// but note that despite living in that header it is **not** enforced by
-/// `validation.cpp` or `policy.cpp` — it is a wallet-level rule. Core's
+/// `validation.cpp` or `policy.cpp`: it is a wallet-level rule. Core's
 /// `delegatestake` RPC rejects smaller amounts, and MyPIVXWallet refuses them
 /// too. This crate follows both rather than emitting delegations the reference
 /// implementations would not.
@@ -60,7 +60,7 @@ pub const STAKE_SPLIT_TARGET: u64 = 50_000_000_000;
 ///
 /// Below the target the whole amount is one output. At or above it, the amount
 /// is cut into `floor(amount / target)` pieces, with the remainder folded into
-/// the *first* one — so every piece is at least the target and none is a stray
+/// the *first* one, so every piece is at least the target and none is a stray
 /// fragment. Returns amounts summing exactly to `amount`.
 ///
 /// ```text
@@ -91,11 +91,11 @@ const OP_CHECKSIG: u8 = 0xac;
 const OP_FALSE: u8 = 0x00;
 const PUSH_20: u8 = 0x14;
 
-/// `OP_CHECKCOLDSTAKEVERIFY_LOF` — "last output free", permitting the final
+/// `OP_CHECKCOLDSTAKEVERIFY_LOF`: "last output free", permitting the final
 /// output of a coinstake to pay elsewhere (masternode and budget payments).
 const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
 
-/// `OP_CHECKCOLDSTAKEVERIFY` — the post-v6.0 form, which drops the last-output
+/// `OP_CHECKCOLDSTAKEVERIFY`: the post-v6.0 form, which drops the last-output
 /// exemption.
 const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
 
@@ -115,7 +115,7 @@ pub enum ColdStakeVariant {
     /// `OP_CHECKCOLDSTAKEVERIFY_LOF` (`0xd1`). **The current network form.**
     ///
     /// Core selects between the two on `UPGRADE_V6_0` activation, and V6 is set
-    /// to `NO_ACTIVATION_HEIGHT` on mainnet, testnet and regtest alike — so
+    /// to `NO_ACTIVATION_HEIGHT` on mainnet, testnet and regtest alike, so
     /// `fV6Enforced` is false everywhere today and Core itself emits LOF.
     /// MyPIVXWallet emits LOF unconditionally, which agrees.
     Lof,
@@ -168,7 +168,7 @@ fn decode_checked(address: &str) -> Result<(u8, [u8; 20]), Box<dyn Error>> {
     let expected = Sha256::digest(Sha256::digest(payload));
     if expected[..4] != checksum[..] {
         return Err(format!(
-            "Invalid address checksum for {address} — the address is mistyped or corrupted"
+            "Invalid address checksum for {address}: the address is mistyped or corrupted"
         )
         .into());
     }
@@ -204,7 +204,7 @@ pub fn decode_staking_address(address: &str) -> Result<[u8; 20], Box<dyn Error>>
     let (version, hash) = decode_checked(address)?;
     if version != PIVX_STAKING_PREFIX {
         return Err(format!(
-            "Address {address} has version byte {version} — not a PIVX staking address, which \
+            "Address {address} has version byte {version}, not a PIVX staking address, which \
              uses {PIVX_STAKING_PREFIX} and renders as `S...`"
         )
         .into());
@@ -217,7 +217,7 @@ pub fn decode_owner_address(address: &str) -> Result<[u8; 20], Box<dyn Error>> {
     let (version, hash) = decode_checked(address)?;
     if version != PIVX_PUBKEY_PREFIX {
         return Err(format!(
-            "Address {address} has version byte {version} — not a PIVX transparent address, \
+            "Address {address} has version byte {version}, not a PIVX transparent address, \
              which uses {PIVX_PUBKEY_PREFIX} and renders as `D...`"
         )
         .into());
@@ -236,7 +236,7 @@ pub fn decode_owner_address(address: &str) -> Result<[u8; 20], Box<dyn Error>> {
 /// ```
 ///
 /// The `OP_IF` branch carries the staking hash and the `OP_ELSE` branch the
-/// owner hash — the redeeming script pushes a boolean to pick one. Getting that
+/// owner hash: the redeeming script pushes a boolean to pick one. Getting that
 /// order backwards would let the staker spend and leave the owner unable to.
 pub fn build_p2cs_script(
     staker: &[u8; 20],
@@ -275,7 +275,7 @@ pub fn p2cs_script_from_addresses(
 /// Whether `script` is a well-formed P2CS output.
 ///
 /// Mirrors Core's `CScript::IsPayToColdStaking`, including the exact-length
-/// requirement — a 52-byte script with the right prefix is not P2CS.
+/// requirement: a 52-byte script with the right prefix is not P2CS.
 pub fn is_p2cs(script: &[u8]) -> bool {
     script.len() == P2CS_SCRIPT_LEN
         && script[0] == OP_DUP
@@ -322,8 +322,8 @@ pub fn addresses_from_p2cs_script(script: &[u8]) -> Result<(String, String), Box
 ///
 /// Identical to a P2PKH `scriptSig` except for a single `OP_FALSE` between the
 /// signature and the pubkey. That byte is the branch selector: `OP_ROT` lifts it
-/// to the top of the stack and `OP_IF` pops it, so false takes `OP_ELSE` — the
-/// owner hash — which `OP_EQUALVERIFY` then matches against `hash160(pubkey)`.
+/// to the top of the stack and `OP_IF` pops it, so false takes `OP_ELSE`: the
+/// owner hash, which `OP_EQUALVERIFY` then matches against `hash160(pubkey)`.
 /// Pushing true instead selects the staking branch, which is the staker's path
 /// and is not what a spend wants.
 ///
@@ -352,7 +352,7 @@ pub fn build_p2pkh_script_sig(sig_with_hashtype: &[u8], pubkey: &[u8]) -> Vec<u8
     script_sig
 }
 
-/// P2PKH `scriptPubKey` for a key hash — the form a P2CS output is redeemed
+/// P2PKH `scriptPubKey` for a key hash: the form a P2CS output is redeemed
 /// *into* when an owner withdraws a delegation.
 pub fn p2pkh_script_from_hash(hash: &[u8; 20]) -> Vec<u8> {
     let mut script = Vec::with_capacity(25);
@@ -387,7 +387,7 @@ pub fn owner_hash_from_seed(
 ///
 /// The output is a normal transaction output with an unusual script, so this
 /// goes through the same [`sign_and_serialize`] path as every other transparent
-/// send — the signed preimage and the emitted body are produced from one
+/// send: the signed preimage and the emitted body are produced from one
 /// `TxOutput` slice by one function, exactly as for a P2PKH send.
 ///
 /// `TransparentTransactionResult::amount` is the delegated amount, excluding
@@ -465,7 +465,7 @@ pub fn estimate_delegation_fee(
 /// # A delegated outpoint can be consumed by the staker
 ///
 /// Unlike an ordinary output, which only its owner can spend, a delegated
-/// output can be consumed at any moment by the staking node — that is what
+/// output can be consumed at any moment by the staking node: that is what
 /// staking *is*. Core's `CheckColdStake` constrains what the staker may do with
 /// it: the spend must be a coinstake with a single input, every output must
 /// carry the identical `scriptPubKey` it is spending (bar the last one under the
@@ -479,7 +479,7 @@ pub fn estimate_delegation_fee(
 /// reference is then rejected by the network for spending an output that no
 /// longer exists.
 ///
-/// Nothing is lost when that happens, and no funds are at risk — but consumers
+/// Nothing is lost when that happens, and no funds are at risk, but consumers
 /// should refresh their UTXO set immediately before building a withdrawal, and
 /// treat a missing-inputs rejection as "re-fetch and rebuild" rather than an
 /// error in the transaction. This crate performs no I/O, so it cannot detect
@@ -509,7 +509,7 @@ pub fn estimate_delegation_fee(
 ///
 /// This is the difference between "withdraw some and keep earning" and
 /// "withdraw some and silently stop staking the rest". A withdrawal spends its
-/// inputs whole, so any part not being withdrawn comes back as change — and
+/// inputs whole, so any part not being withdrawn comes back as change, and
 /// plain change is an ordinary output, no longer delegated.
 #[derive(Debug, Clone, Copy)]
 pub enum WithdrawalChange<'a> {
@@ -551,7 +551,7 @@ pub fn create_coldstake_withdrawal(
 /// held beyond the amount taken, which is rarely what a user pressing
 /// "withdraw 4,000 of my 10,000" expects.
 ///
-/// Note that inputs *not* supplied are untouched and keep staking either way —
+/// Note that inputs *not* supplied are untouched and keep staking either way:
 /// this only governs the change from the inputs actually spent.
 pub fn create_coldstake_withdrawal_with_change(
     bip39_seed: &[u8],
@@ -581,7 +581,7 @@ pub fn create_coldstake_withdrawal_with_change(
     for (i, utxo) in delegated.iter().enumerate() {
         if utxo.script.is_empty() {
             return Err(format!(
-                "UTXO {}:{} has no script — withdrawing a delegation needs the P2CS \
+                "UTXO {}:{} has no script: withdrawing a delegation needs the P2CS \
                  scriptPubKey, which the sighash commits to and cannot be inferred",
                 utxo.txid, utxo.vout
             )
@@ -609,7 +609,7 @@ pub fn create_coldstake_withdrawal_with_change(
         })?;
         if hashes.owner != owner {
             return Err(format!(
-                "UTXO {}:{} is owned by {} — this wallet's key at {from_change}/{from_index} is \
+                "UTXO {}:{} is owned by {}: this wallet's key at {from_change}/{from_index} is \
                  {own_address}, so it cannot sign for it",
                 utxo.txid,
                 utxo.vout,
@@ -619,7 +619,7 @@ pub fn create_coldstake_withdrawal_with_change(
         }
         total = total
             .checked_add(utxo.amount)
-            .ok_or("UTXO total overflow — caller passed malformed amounts")?;
+            .ok_or("UTXO total overflow: caller passed malformed amounts")?;
         inputs.push(SigningInput {
             utxo: utxo.clone(),
             prevout_script: script,
@@ -635,7 +635,7 @@ pub fn create_coldstake_withdrawal_with_change(
     //    P2PKH one, which the flat 34-bytes-per-output figure does not cover.
     //
     // Missing the second one produced a transaction a node rejected outright
-    // with `insufficient fee: 2290 < 2520` — the fee model has to track the
+    // with `insufficient fee: 2290 < 2520`: the fee model has to track the
     // real serialized size, because that is what the relay minimum is charged
     // against. Budgeting for P2CS change even when the change turns out to be
     // plain (below the delegation minimum) merely over-pays slightly, which is
@@ -660,7 +660,7 @@ pub fn create_coldstake_withdrawal_with_change(
     let destination = keys::address_to_p2pkh_script(to_address)?;
     if fees::is_dust(amount, destination.len()) {
         return Err(format!(
-            "Withdrawal of {amount} sat is below the dust threshold of {} sat — a transaction \
+            "Withdrawal of {amount} sat is below the dust threshold of {} sat: a transaction \
              containing a dust output is non-standard and will not relay",
             fees::dust_threshold(destination.len())
         )
@@ -718,7 +718,7 @@ struct DelegationSelection {
 /// Validate the delegation and select UTXOs to cover it.
 ///
 /// Shared by the builder and the estimator so the two cannot quote different
-/// fees — the fee depends on how many inputs selection reaches for.
+/// fees: the fee depends on how many inputs selection reaches for.
 fn select_for_delegation(
     wallet: &WalletData,
     staking_address: &str,
@@ -778,7 +778,7 @@ fn select_for_delegation(
         selected.push(utxo.clone());
         total = total
             .checked_add(utxo.amount)
-            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
+            .ok_or("UTXO total overflow: explorer returned malformed amounts")?;
         if total >= amount.saturating_add(fee_for(selected.len())) {
             break;
         }

@@ -4,7 +4,7 @@
 //! Deliberately reimplements the transaction format rather than calling into the
 //! crate: a verifier built on the code under test agrees with itself even when
 //! both are wrong, which is exactly the failure these tests exist to catch. What
-//! it must *not* be is three near-identical copies — they drift, and a bug in
+//! it must *not* be is three near-identical copies: they drift, and a bug in
 //! one silently weakens every test that uses it.
 //!
 //! So this is one independent implementation, shared.
@@ -180,7 +180,7 @@ pub fn split_script_sig(script_sig: &[u8]) -> (Vec<u8>, Vec<u8>, bool) {
     (sig_der.to_vec(), pubkey.to_vec(), cold_stake_selector)
 }
 
-/// P2PKH `scriptPubKey` for a pubkey — what a node reconstructs to check a
+/// P2PKH `scriptPubKey` for a pubkey: what a node reconstructs to check a
 /// P2PKH input.
 pub fn p2pkh_script_from_pubkey(pubkey: &[u8]) -> Vec<u8> {
     use ripemd::Ripemd160;
@@ -217,7 +217,7 @@ pub fn verify_with_prevouts(tx: &Decoded, prevout_scripts: &[Vec<u8>]) -> usize 
         secp.verify_ecdsa(&msg, &sig, &pk).unwrap_or_else(|e| {
             panic!(
                 "input {i}: SIGNATURE DOES NOT COMMIT TO THIS TRANSACTION ({e}).\n\
-                 The signed preimage and the serialized transaction disagree — the network \
+                 The signed preimage and the serialized transaction disagree: the network \
                  would reject this, or a serialization bug is paying outputs the signature \
                  never authorised."
             )
@@ -227,7 +227,7 @@ pub fn verify_with_prevouts(tx: &Decoded, prevout_scripts: &[Vec<u8>]) -> usize 
 }
 
 /// Verify every input, reconstructing each prevout script from the pubkey in its
-/// own `scriptSig` — exactly the information a validating node has for P2PKH.
+/// own `scriptSig`: exactly the information a validating node has for P2PKH.
 pub fn verify_all_signatures(tx: &Decoded) -> usize {
     let prevouts: Vec<Vec<u8>> = tx
         .inputs

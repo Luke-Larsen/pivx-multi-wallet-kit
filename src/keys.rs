@@ -62,7 +62,7 @@ pub fn get_default_address(enc_extfvk: &str) -> Result<String, Box<dyn Error>> {
 /// diversifier is an 11-byte value derived from a diversifier *index*. All
 /// addresses produced from the same extfvk decrypt to the same spending
 /// key, so an unlimited number of distinct receive addresses can be issued
-/// without the wallet needing to track multiple secrets — exactly what the
+/// without the wallet needing to track multiple secrets: exactly what the
 /// merchant flow wants (one address per invoice).
 ///
 /// Not every index produces a valid diversifier (~50% are rejected by the
@@ -84,13 +84,13 @@ pub fn shield_address_at(
     let start: DiversifierIndex = DiversifierIndex::from(start_index);
     let (idx, address) = dfvk
         .find_address(start)
-        .ok_or("no valid diversifier found beyond start_index — exhausted the diversifier space")?;
+        .ok_or("no valid diversifier found beyond start_index: exhausted the diversifier space")?;
     // The diversifier index is an 11-byte value but for invoice-counter use
     // cases we always pass `u32` in, so a `u32` round-trip is guaranteed
     // unless a caller deliberately exceeded u32::MAX. Surface that as an
     // error rather than silently truncating.
     let used = u32::try_from(idx).map_err(|_| {
-        "diversifier index overflowed u32 — caller's start_index was too close to u32::MAX"
+        "diversifier index overflowed u32: caller's start_index was too close to u32::MAX"
     })?;
     Ok((used, encode_payment_address(&address)))
 }
@@ -144,7 +144,7 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 #[allow(clippy::type_complexity)] // Tuple return is a documented stable shape; refactor tracked as an ergonomics concern
 /// Derive a BIP44 transparent key triple at `m/44'/119'/0'/{change}/{index}`.
 ///
-/// The privkey is returned wrapped in [`Zeroizing`] — it'll wipe its 32-byte
+/// The privkey is returned wrapped in [`Zeroizing`]: it'll wipe its 32-byte
 /// buffer when the caller drops it. Callers that need to copy the bytes into
 /// another secret-bearing struct should do so via the deref (`&*privkey` or
 /// `privkey.as_slice()`); copies into non-zeroizing containers re-introduce
@@ -231,7 +231,7 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
 ///    *public key* whose hash matches, which no script hash will ever be.
 ///    Addresses from other networks are rejected for the same reason.
 ///
-/// Callers that need P2SH support want a separate script builder — this one is
+/// Callers that need P2SH support want a separate script builder: this one is
 /// P2PKH by construction, so it refuses anything else rather than silently
 /// mislabelling it.
 pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -252,14 +252,14 @@ pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>>
     let expected = Sha256::digest(Sha256::digest(payload));
     if expected[..4] != checksum[..] {
         return Err(format!(
-            "Invalid address checksum for {address} — the address is mistyped or corrupted"
+            "Invalid address checksum for {address}: the address is mistyped or corrupted"
         )
         .into());
     }
 
     if payload[0] != PIVX_PUBKEY_PREFIX {
         return Err(format!(
-            "Address {address} has version byte {} — not a PIVX transparent (P2PKH) address, \
+            "Address {address} has version byte {}, not a PIVX transparent (P2PKH) address, \
              which uses {PIVX_PUBKEY_PREFIX}. Paying it as P2PKH would create an unspendable \
              output.",
             payload[0]

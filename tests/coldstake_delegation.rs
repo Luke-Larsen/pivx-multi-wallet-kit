@@ -1,13 +1,13 @@
 //! Delegation transactions: transparent inputs → one P2CS output.
 //!
 //! A delegation is a normal transaction with an unusual output script, so the
-//! risk is the same as any transparent send — the signature must commit to the
+//! risk is the same as any transparent send: the signature must commit to the
 //! outputs actually emitted. The signature check here re-derives the sighash
 //! from the finished bytes rather than calling the builder's own hashing code,
 //! for the same reason as `transparent_sighash.rs`: a verifier that reuses the
 //! code under test agrees with itself even when both are wrong.
 //!
-//! The P2CS output makes this stricter than a P2PKH send in one way — a
+//! The P2CS output makes this stricter than a P2PKH send in one way: a
 //! signature covering a *different* script than the one serialized would still
 //! look plausible to any check that only inspects lengths and totals.
 
@@ -118,7 +118,7 @@ fn recovered_addresses_match_the_request() {
     assert_eq!(recovered_owner, keys::get_transparent_address(TEST_MNEMONIC).unwrap());
 }
 
-/// Tampering with the P2CS script after signing must invalidate — the check
+/// Tampering with the P2CS script after signing must invalidate: the check
 /// that proves the signature really covers the delegation script and not just
 /// its length.
 #[test]

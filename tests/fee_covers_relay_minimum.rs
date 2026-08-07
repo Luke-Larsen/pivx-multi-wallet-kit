@@ -83,7 +83,7 @@ fn assert_fee_covers_size(label: &str, txhex: &str, fee: u64) {
     let minimum = bytes * MIN_RELAY_SAT_PER_BYTE;
     assert!(
         fee >= minimum,
-        "{label}: fee {fee} sat is below the relay minimum for {bytes} bytes ({minimum} sat) — \
+        "{label}: fee {fee} sat is below the relay minimum for {bytes} bytes ({minimum} sat): \
          a node would reject this with `insufficient fee: {fee} < {minimum}`"
     );
 }
@@ -154,7 +154,7 @@ fn plain_withdrawals_cover_the_relay_minimum() {
 }
 
 /// The regression. Re-delegated change is a 51-byte P2CS script, not a 25-byte
-/// P2PKH one — the case that was under-charged on mainnet.
+/// P2PKH one: the case that was under-charged on mainnet.
 #[test]
 fn withdrawals_with_delegated_change_cover_the_relay_minimum() {
     let staking = staking_addr();
@@ -207,7 +207,7 @@ fn the_shape_mainnet_rejected_now_pays_enough() {
     let bytes = simd::hex::hex_string_to_bytes(&r.txhex).len();
     assert!(
         (250..=254).contains(&bytes),
-        "expected roughly the 252-byte mainnet shape, got {bytes} — re-check the arithmetic"
+        "expected roughly the 252-byte mainnet shape, got {bytes}: re-check the arithmetic"
     );
     assert!(
         r.fee >= 2_520,
@@ -254,7 +254,7 @@ fn fee_holds_across_signature_length_variation() {
 }
 
 /// Delegated change costs more than plain change, and the difference is the
-/// P2CS output surcharge — not a coincidence of rounding.
+/// P2CS output surcharge, not a coincidence of rounding.
 #[test]
 fn delegated_change_costs_the_p2cs_surcharge_more() {
     let staking = staking_addr();

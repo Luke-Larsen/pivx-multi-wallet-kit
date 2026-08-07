@@ -38,7 +38,7 @@ pub fn estimate_raw_transparent_fee(input_count: usize, output_count: usize) -> 
 ///
 /// `DUST_RELAY_TX_FEE` in PIVX Core's `policy/policy.h`. An output worth less
 /// than it would cost to spend is "dust", and a transaction containing one is
-/// non-standard — `IsStandardTx` rejects it with `reason = "dust"`, so no node
+/// non-standard: `IsStandardTx` rejects it with `reason = "dust"`, so no node
 /// relays it. Confirmed against a live node, which answered a transaction
 /// carrying 1000 sat of change with `-26: dust:`.
 pub const DUST_RELAY_TX_FEE: u64 = 30_000;
@@ -49,7 +49,7 @@ pub const DUST_RELAY_TX_FEE: u64 = 30_000;
 /// the 148 bytes an input spending it would cost, priced at the dust relay rate.
 ///
 /// Works out to 5460 sat for a P2PKH output (25-byte script) and 6240 sat for a
-/// cold-staking one (51-byte script) — a delegation is bulkier to spend, so it
+/// cold-staking one (51-byte script): a delegation is bulkier to spend, so it
 /// has to be worth more to be worth creating.
 pub fn dust_threshold(script_len: usize) -> u64 {
     // value (8) + the script's length prefix + the script itself.
@@ -79,7 +79,7 @@ pub const P2CS_OUTPUT_EXTRA_BYTES: usize = 26;
 ///
 /// Exists because the flat model assumes every output is P2PKH-sized. Rather
 /// than let callers with larger scripts silently under-pay, they declare the
-/// difference — see [`P2CS_OUTPUT_EXTRA_BYTES`].
+/// difference: see [`P2CS_OUTPUT_EXTRA_BYTES`].
 #[inline]
 pub fn estimate_raw_transparent_fee_with_extra(
     input_count: usize,

@@ -1,4 +1,4 @@
-// PIVX Wallet Kit — tiny browser demo (v0.2 class-style API).
+// PIVX Wallet Kit: tiny browser demo (v0.2 class-style API).
 //
 // Loads the WASM, derives addresses from a BIP39 mnemonic, fetches transparent
 // UTXOs from Blockbook and sums them via the kit's parser, and demonstrates the
@@ -11,7 +11,7 @@
 //     wasm-pack build --release --target web
 //
 // NOTE: that overwrites `../../pkg/` with the web-target shape. The npm
-// publish artifact is built with `--target bundler` instead — running both
+// publish artifact is built with `--target bundler` instead: running both
 // from the same checkout means re-running the publish build before tagging.
 
 import init, {
@@ -25,7 +25,7 @@ import init, {
 const RPC = 'https://rpc.pivxla.bz/mainnet';
 const EXPLORER = 'https://explorer.pivxla.bz';
 /// Process decoded blocks in chunks of this size when feeding them to
-/// `wallet.applyBlocks`. This is purely for progress UI — the full stream is
+/// `wallet.applyBlocks`. This is purely for progress UI: the full stream is
 /// fetched and parsed in one go, so batch boundaries don't truncate.
 const SHIELD_HANDLE_CHUNK = 500;
 
@@ -271,7 +271,7 @@ async function main() {
 
   // The encrypt/decrypt pair demonstrates the round-trip a real web wallet
   // runs before writing to localStorage. The plaintext seed/mnemonic never
-  // leaves WASM memory in encrypted form — the JSON returned by
+  // leaves WASM memory in encrypted form: the JSON returned by
   // toSerializedEncrypted() is safe to persist anywhere.
   $('encrypt').onclick = async () => {
     if (!wallet) return;
@@ -279,7 +279,7 @@ async function main() {
     if (!pass) { alert('Enter a passphrase.'); return; }
     const key = await passphraseToKey(pass);
     const encrypted = wallet.toSerializedEncrypted(key);
-    // Replace the live wallet with one reconstructed from the ciphertext —
+    // Replace the live wallet with one reconstructed from the ciphertext:
     // it'll come back in the LOCKED state. JS now only holds the encrypted
     // JSON, mirroring the persist→reload cycle a real wallet would run.
     wallet.free();

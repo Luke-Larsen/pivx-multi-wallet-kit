@@ -1,4 +1,4 @@
-//! PIVX chain constants — single source of truth for chain-specific values.
+//! PIVX chain constants: single source of truth for chain-specific values.
 
 /// Satoshis per PIV (8 decimals).
 pub const COIN: u64 = 100_000_000;

@@ -133,7 +133,7 @@ fn staking_addresses_round_trip() {
     }
 }
 
-/// Version bytes are enforced in both directions — an owner address is not a
+/// Version bytes are enforced in both directions: an owner address is not a
 /// staking address and vice versa.
 #[test]
 fn address_decoders_enforce_their_version_byte() {
@@ -225,7 +225,7 @@ fn owner_script_sig_inserts_op_false_between_signature_and_pubkey() {
     let mut expected = Vec::new();
     expected.push(sig.len() as u8);
     expected.extend_from_slice(&sig);
-    expected.push(0x00); // OP_FALSE — selects the OP_ELSE (owner) branch
+    expected.push(0x00); // OP_FALSE: selects the OP_ELSE (owner) branch
     expected.push(pubkey.len() as u8);
     expected.extend_from_slice(&pubkey);
 
@@ -249,7 +249,7 @@ fn owner_script_sig_inserts_op_false_between_signature_and_pubkey() {
 /// agree with itself even if the branch order were inverted. These bytes were
 /// produced by PIVX Core, not by this crate.
 ///
-/// `SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy` is independently recognisable — it is
+/// `SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy` is independently recognisable: it is
 /// the `defaultColdStakingAddress` MyPIVXWallet ships in `chain_params.json`.
 const MAINNET_P2CS: &[(u32, &str, &str, &str)] = &[
     (
@@ -309,7 +309,7 @@ fn mainnet_outputs_use_the_lof_variant() {
 }
 
 /// Rebuilding from the parsed addresses must reproduce the on-chain bytes
-/// exactly — the round-trip that proves the builder and the network agree.
+/// exactly: the round-trip that proves the builder and the network agree.
 #[test]
 fn rebuilding_real_outputs_is_byte_identical() {
     for (height, hex, _, _) in MAINNET_P2CS {
@@ -353,7 +353,7 @@ fn owner_hash_matches_the_derived_key() {
         assert_eq!(&from_seed[..], &expected[..], "index {index}");
 
         // The P2CS script's owner branch must equal the P2PKH hash for the same
-        // key — that equality is what lets the owner redeem.
+        // key: that equality is what lets the owner redeem.
         let script = build_p2cs_script(&STAKER, &from_seed, ColdStakeVariant::Lof);
         let p2pkh = coldstake::p2pkh_script_from_hash(&from_seed);
         assert_eq!(&script[28..48], &p2pkh[3..23]);

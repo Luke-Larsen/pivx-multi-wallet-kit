@@ -5,7 +5,7 @@
 
 Pure-Rust wallet primitives for [PIVX](https://pivx.org), with first-class Sapling shield support.
 
-Designed as the shared core that powers PIVX wallet clients — native CLIs, MCP servers, desktop apps, and embeddable web wallets — from a single audited codebase.
+Designed as the shared core that powers PIVX wallet clients (native CLIs, MCP servers, desktop apps, and embeddable web wallets) from a single audited codebase.
 
 ## Why
 
@@ -38,12 +38,12 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | `messages`                      | PIVX Core-compatible message signing / verification                        |
 | `fees`                          | Component-based fee estimation for v3 and raw v1 transactions              |
 | `wallet`                        | In-memory `WalletData`, (de)serialization, symmetric secret encryption, Blockbook UTXO parser |
-| `sync`                          | Pure shield stream parser — bytes → block batches                          |
+| `sync`                          | Pure shield stream parser: bytes → block batches                          |
 | `sapling::sync`                 | `handle_blocks`: decrypt notes, advance tree, extract nullifiers           |
 | `sapling::tree`                 | Commitment tree root extraction and empty-tree helpers                     |
 | `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes)         |
 | `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) |
-| `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry — no prover needed for transparent dests) |
+| `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry: no prover needed for transparent dests) |
 | `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders |
 | `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers |
 
@@ -69,7 +69,7 @@ Groth16 proving is single-threaded by default on every target. The `multicore` f
 rayon-parallel proving in `bellman` and `sapling`:
 
 ```bash
-# Native — parallelises the Groth16 FFT/multiexp across cores.
+# Native: parallelises the Groth16 FFT/multiexp across cores.
 # Recommended for servers, CLIs, and anything else not running in a browser.
 cargo build --release --features multicore
 ```
@@ -81,7 +81,7 @@ turn it on.
 On `wasm32` the feature additionally pulls in `wasm-bindgen-rayon`, and needs real setup: a
 nightly toolchain with `-Z build-std`, the `atomics` and `bulk-memory` target features, COOP/COEP
 headers on the serving origin, and a call to `initThreadPool` before any proving. **Without all
-of that, leave it off** — rayon in a threadless WASM build blocks forever waiting for worker
+of that, leave it off**: rayon in a threadless WASM build blocks forever waiting for worker
 threads that can never be spawned. The default single-threaded build proves in ~6s in-browser,
 which is slower than native but always returns.
 
@@ -99,7 +99,7 @@ pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit" }
 ```rust
 use pivx_wallet_kit::{wallet, sapling, transparent, keys};
 
-// Import from mnemonic — consumer fetches current height from its RPC source.
+// Import from mnemonic: consumer fetches current height from its RPC source.
 let current_height = fetch_from_rpc();
 let mut w = wallet::import_wallet(&mnemonic, current_height)?;
 
@@ -121,7 +121,7 @@ let tx = transparent::builder::create_raw_transparent_transaction(
 // For anything touching Sapling, load the proving parameters once:
 let prover = sapling::prover::verify_and_load_params(&output_bytes, &spend_bytes)?;
 
-// Build a shield transaction — pure function, no I/O.
+// Build a shield transaction: pure function, no I/O.
 let tx = sapling::builder::create_shield_transaction(
     &mut w, &to_address, amount, &memo, block_height, &prover,
 )?;
@@ -135,7 +135,7 @@ let tx = sapling::builder::create_shield_transaction(
 npm install @pivx-labs/pivx-wallet-kit
 ```
 
-The package exports a class-style API. The seed and mnemonic stay on the WASM heap — JS only ever sees handles and serialized JSON.
+The package exports a class-style API. The seed and mnemonic stay on the WASM heap: JS only ever sees handles and serialized JSON.
 
 ```js
 import init, {
@@ -305,13 +305,13 @@ A freshly staked delegation appears in both `delegatedBalanceSat` and `immatureB
 
 ## Status
 
-**v0.4.0** — **cold staking**, plus dust handling that was missing crate-wide.
+**v0.4.0**: **cold staking**, plus dust handling that was missing crate-wide.
 
 Delegate transparent funds to a staking key that can stake them but never move them,
 and withdraw them again: `delegateColdStake`, `withdrawColdStake`,
 `withdrawColdStakeKeepingRest`, `stakingAddress` / `stakingAddressAt`,
 `inspectColdStakeScript`, and matching fee estimators. Delegations at or above 500 PIV
-are split into staking-sized outputs, matching MyPIVXWallet's `stakeSplitTarget` —
+are split into staking-sized outputs, matching MyPIVXWallet's `stakeSplitTarget`:
 staking works per output, so one large delegation is a single staking unit where several
 compete independently.
 
@@ -321,7 +321,7 @@ on mainnet (blocks 5522082 and 5522083). A wrong P2CS script does not fail loudl
 produces an output that is either unspendable or spendable by the wrong party.
 
 **One behaviour changed for everyone, not just cold staking.** PIVX rejects any output
-worth less than it costs to spend — `IsStandardTx` fails with `reason = "dust"`, so no
+worth less than it costs to spend: `IsStandardTx` fails with `reason = "dust"`, so no
 node relays the transaction. The crate had no notion of this and would build
 transactions nothing would accept. See *Upgrading to 0.4.0*.
 
@@ -336,7 +336,7 @@ differ:
    miner** rather than emitted.
 
 2. **`result.fee` is now the fee actually paid**, computed from inputs minus outputs,
-   rather than the estimate. When dust change is absorbed the two differ — the reported
+   rather than the estimate. When dust change is absorbed the two differ: the reported
    figure is the larger, true one. Consumers displaying a fee to users will show a
    slightly higher number in that case, which is the number the user actually pays.
 
@@ -348,11 +348,11 @@ rejects. **Consumers using cold staking must join the script on themselves**, fr
 present. See [Cold staking needs scripts](#cold-staking-needs-scripts). Wallets that
 never delegate are unaffected.
 
-**v0.3.0** — multi-recipient sends (`sendTransparentToMany`, `sendShieldToMany`,
+**v0.3.0**: multi-recipient sends (`sendTransparentToMany`, `sendShieldToMany`,
 `sendTransparentFromUtxosToMany`, plus matching fee estimators), and four fixes to
-pre-existing bugs found while building them. **The API is purely additive — no existing
+pre-existing bugs found while building them. **The API is purely additive: no existing
 signature changed, and existing single-recipient sends produce byte-identical
-transactions** — but three fixes tighten validation, so input that was previously accepted
+transactions**, but three fixes tighten validation, so input that was previously accepted
 is now refused. See *Upgrading to 0.3.0* below.
 
 ### Upgrading to 0.3.0
@@ -369,13 +369,13 @@ Existing calls keep working unchanged. Four behaviours differ, all deliberately:
 2. **Duplicate outpoints are rejected.** Blockbook lists the same UTXO twice while a
    transaction is confirming, which made the wallet read double its balance and build a
    transaction spending one output twice. `parseBlockbookUtxos` now collapses duplicates,
-   and the builders refuse a set that still contains any — including UTXOs supplied
+   and the builders refuse a set that still contains any, including UTXOs supplied
    directly to `sendTransparentFromUtxos*`.
 
 3. **`applyBlocks` now advances `lastBlock()` and skips already-applied heights.** This is
    the one that needs an action. Previously `last_block` only ever moved in
-   `resetToCheckpoint`, so a consumer syncing from `lastBlock() + 1` — the pattern this
-   README and the web-wallet example both document — re-applied the whole range from the
+   `resetToCheckpoint`, so a consumer syncing from `lastBlock() + 1`: the pattern this
+   README and the web-wallet example both document: re-applied the whole range from the
    checkpoint on every sync after the first, advancing the commitment tree twice and
    shifting every witness position.
 
@@ -388,17 +388,17 @@ Existing calls keep working unchanged. Four behaviours differ, all deliberately:
    The 512-byte Sapling limit is on encoded bytes, so a 200-character string of multi-byte
    characters (600 bytes) is refused.
 
-**v0.2.5** — **fixes a hang that made every shield send unusable in the browser.** `sendTransparentToShield` (and any other Groth16 proving path) never returned in WASM builds, spinning at 100% CPU indefinitely; the same transaction built in ~0.35s natively. Cause: `bellman` and `sapling` both default-enable a `multicore` feature that pulls in rayon, and this crate declared them without `default-features = false`, so rayon shipped inside the default WASM artifact and blocked forever waiting for worker threads that a threadless build can never spawn. Both dependencies are now pinned single-threaded — matching what librustpivx's own workspace already does — and CI asserts the built artifact is rayon-free. Parallel proving remains available behind the `multicore` feature, which now switches rayon and the `wasm-bindgen-rayon` thread pool together instead of only the latter. Shield proofs take ~6s single-threaded in-browser. No API change.
+**v0.2.5**: **fixes a hang that made every shield send unusable in the browser.** `sendTransparentToShield` (and any other Groth16 proving path) never returned in WASM builds, spinning at 100% CPU indefinitely; the same transaction built in ~0.35s natively. Cause: `bellman` and `sapling` both default-enable a `multicore` feature that pulls in rayon, and this crate declared them without `default-features = false`, so rayon shipped inside the default WASM artifact and blocked forever waiting for worker threads that a threadless build can never spawn. Both dependencies are now pinned single-threaded: matching what librustpivx's own workspace already does, and CI asserts the built artifact is rayon-free. Parallel proving remains available behind the `multicore` feature, which now switches rayon and the `wasm-bindgen-rayon` thread pool together instead of only the latter. Shield proofs take ~6s single-threaded in-browser. No API change.
 
-**v0.2.4** — `sync`: parse compact spend/output counts as CompactSize varint.
+**v0.2.4**: `sync`: parse compact spend/output counts as CompactSize varint.
 
-**v0.2.3** — exposes `create_raw_transparent_transaction_from_utxos` to JS as `Wallet.sendTransparentFromUtxos(fromChange, fromIndex, utxos, toAddress, amountSat)`. Same primitive that was Rust-only in v0.2.2, now available to web wallets and Node.js consumers. Backwards-compatible; existing callers see no API change.
+**v0.2.3**: exposes `create_raw_transparent_transaction_from_utxos` to JS as `Wallet.sendTransparentFromUtxos(fromChange, fromIndex, utxos, toAddress, amountSat)`. Same primitive that was Rust-only in v0.2.2, now available to web wallets and Node.js consumers. Backwards-compatible; existing callers see no API change.
 
-**v0.2.2** — adds `transparent::builder::create_raw_transparent_transaction_from_utxos` for spending from any HD-indexed address with caller-supplied UTXOs. Unblocks consumers that maintain multiple receive addresses (payment processors, hierarchical accounting). Backwards-compatible; existing callers see no API change.
+**v0.2.2**: adds `transparent::builder::create_raw_transparent_transaction_from_utxos` for spending from any HD-indexed address with caller-supplied UTXOs. Unblocks consumers that maintain multiple receive addresses (payment processors, hierarchical accounting). Backwards-compatible; existing callers see no API change.
 
-**v0.2.1** — adds diversifier-based shield address derivation (`shield_address_at`) for merchant use cases where one address per invoice is needed. Backwards-compatible; existing callers see no API change.
+**v0.2.1**: adds diversifier-based shield address derivation (`shield_address_at`) for merchant use cases where one address per invoice is needed. Backwards-compatible; existing callers see no API change.
 
-**v0.2.0** — class-style WASM API, full audit pass (3 rounds), end-to-end mainnet verification across all four send paths (T↔T, T↔S, S↔T, S↔S). Used in production by [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) and [`pivx-tasks`](https://github.com/PIVX-Labs/pivx-tasks).
+**v0.2.0**: class-style WASM API, full audit pass (3 rounds), end-to-end mainnet verification across all four send paths (T↔T, T↔S, S↔T, S↔S). Used in production by [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) and [`pivx-tasks`](https://github.com/PIVX-Labs/pivx-tasks).
 
 ## License
 

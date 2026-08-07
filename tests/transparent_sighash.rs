@@ -1,6 +1,6 @@
 //! Signature-level verification for the raw v1 transparent builders.
 //!
-//! The existing integration tests assert on transaction *shape* — hex is
+//! The existing integration tests assert on transaction *shape*: hex is
 //! non-empty, version bytes are right, a script appears somewhere in the body.
 //! None of them check that the ECDSA signatures actually commit to the
 //! transaction that was built. That gap matters because the transparent path
@@ -16,8 +16,8 @@
 //!
 //! So these tests re-derive everything from the finished transaction bytes and
 //! never call the builder's own hashing code. The prevout script is
-//! reconstructed from the pubkey inside each `scriptSig` — exactly the
-//! information a node has — which means a bug in `compute_sighash` cannot hide
+//! reconstructed from the pubkey inside each `scriptSig`: exactly the
+//! information a node has, which means a bug in `compute_sighash` cannot hide
 //! by being reused on both sides of the comparison.
 
 mod common;
@@ -152,7 +152,7 @@ fn every_input_signature_is_independently_valid() {
 }
 
 /// Negative control. The verifier must actually reject a transaction whose
-/// outputs were altered after signing — otherwise the tests above prove
+/// outputs were altered after signing: otherwise the tests above prove
 /// nothing. Flipping one satoshi in an output value invalidates the preimage
 /// without touching the signature.
 #[test]
@@ -179,12 +179,12 @@ fn verifier_rejects_a_tampered_output_value() {
 
     assert!(
         panicked,
-        "verifier accepted a transaction whose output value was changed after signing — the \
+        "verifier accepted a transaction whose output value was changed after signing: the \
          harness is not actually checking the signature"
     );
 }
 
-/// Negative control for recipient substitution — the failure mode that costs
+/// Negative control for recipient substitution: the failure mode that costs
 /// money. Redirecting an output to a different address must invalidate the
 /// signature.
 #[test]
@@ -234,8 +234,8 @@ fn distinct_addresses(bip39_seed: &[u8], n: u32) -> Vec<String> {
 /// signature must commit to all four outputs, and each must carry exactly the
 /// requested amount to exactly the requested address, in the requested order.
 ///
-/// This is the case Erik's commission split needs — paying a seller and a
-/// referrer from one transaction — and paying the wrong split is the failure
+/// This is the case Erik's commission split needs: paying a seller and a
+/// referrer from one transaction, and paying the wrong split is the failure
 /// that costs money.
 #[test]
 fn multi_recipient_signature_commits_to_every_output() {
@@ -266,7 +266,7 @@ fn multi_recipient_signature_commits_to_every_output() {
         let expected_script = keys::address_to_p2pkh_script(&r.address).unwrap();
         assert_eq!(
             tx.outputs[i].script_pubkey, expected_script,
-            "output {i} pays the wrong address — recipient order was not preserved"
+            "output {i} pays the wrong address: recipient order was not preserved"
         );
         assert_eq!(
             tx.outputs[i].value, r.amount,
@@ -290,7 +290,7 @@ fn multi_recipient_signature_commits_to_every_output() {
     assert_eq!(100_000_000 - out_total, result.fee);
 }
 
-/// Multi-recipient with no change output — exercises a different output count
+/// Multi-recipient with no change output: exercises a different output count
 /// in both the preimage and the body.
 #[test]
 fn multi_recipient_without_change() {
@@ -318,7 +318,7 @@ fn multi_recipient_without_change() {
     assert_eq!(result.amount, 100_000_000 - fee);
 }
 
-/// Many recipients across many inputs — the combination most likely to expose
+/// Many recipients across many inputs: the combination most likely to expose
 /// a varint or offset error, since both counts cross out of single-byte range
 /// behaviour in the same transaction.
 #[test]
@@ -359,8 +359,8 @@ fn multi_recipient_multi_input() {
 }
 
 /// Tampering with a *middle* output must invalidate the signature. A sighash
-/// that only committed to the first and last outputs — an easy off-by-one when
-/// generalising from the old fixed two-output shape — would pass every
+/// that only committed to the first and last outputs: an easy off-by-one when
+/// generalising from the old fixed two-output shape: would pass every
 /// positive test above and fail here.
 #[test]
 fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
@@ -392,7 +392,7 @@ fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
 
     assert!(
         panicked,
-        "signature did not commit to the middle output — a recipient could be swapped without \
+        "signature did not commit to the middle output: a recipient could be swapped without \
          invalidating the transaction"
     );
 }
@@ -453,7 +453,7 @@ fn single_recipient_is_byte_identical_through_both_entry_points() {
 
     assert_eq!(
         legacy.txhex, via_many.txhex,
-        "the multi-recipient path changed single-recipient output — existing callers would see \
+        "the multi-recipient path changed single-recipient output: existing callers would see \
          different transactions"
     );
     assert_eq!(legacy.fee, via_many.fee);
@@ -525,7 +525,7 @@ fn multi_recipient_rejects_invalid_input() {
 /// The output count crosses from a 1-byte varint to the 3-byte `0xfd` form at
 /// 253. That transition happens independently in the sighash preimage and in
 /// the transaction body, so it is the single most likely place for the two to
-/// disagree — and a disagreement is invisible to any check that does not verify
+/// disagree, and a disagreement is invisible to any check that does not verify
 /// the signature.
 #[test]
 fn signature_holds_across_the_output_count_varint_boundary() {
@@ -594,8 +594,8 @@ fn signature_holds_across_the_input_count_varint_boundary() {
 }
 
 /// Dust recipients are refused. A transaction carrying an output worth less than
-/// it costs to spend is non-standard — `IsStandardTx` rejects it with
-/// `reason = "dust"` — so building one hands the caller bytes no node will
+/// it costs to spend is non-standard: `IsStandardTx` rejects it with
+/// `reason = "dust"`, so building one hands the caller bytes no node will
 /// relay. Confirmed against a live node, which answered `-26: dust:`.
 #[test]
 fn dust_recipients_are_rejected() {
@@ -637,7 +637,7 @@ fn dust_recipients_are_rejected() {
 
 /// Dust *change* is dropped rather than emitted, since keeping it would make the
 /// transaction unrelayable. The dropped value goes to the miner, so the fee the
-/// result reports must be the fee actually paid — not the estimate.
+/// result reports must be the fee actually paid, not the estimate.
 #[test]
 fn dust_change_is_absorbed_into_the_fee() {
     let bip39_seed = seed();
@@ -645,7 +645,7 @@ fn dust_change_is_absorbed_into_the_fee() {
     let total = 100_000_000u64;
     let utxos = vec![utxo("d", 0, total)];
 
-    // Aim to leave 1000 sat of change — well under the 5460 threshold.
+    // Aim to leave 1000 sat of change: well under the 5460 threshold.
     let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
     let amount = total - fee - 1_000;
 
@@ -697,7 +697,7 @@ fn non_dust_change_is_emitted() {
 }
 
 /// A repeated outpoint must be refused. `parse_blockbook_utxos` collapses
-/// duplicates, but the from-UTXOs builders bypass the parser entirely — the
+/// duplicates, but the from-UTXOs builders bypass the parser entirely: the
 /// caller hands in an exact set and every one of them is spent. Pre-fix this
 /// built a transaction spending one output twice while claiming double its
 /// value.
@@ -747,7 +747,7 @@ fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
 }
 
 /// The parser must consume exactly the bytes the builder emitted. Catches
-/// length-prefix drift — a varint written for the wrong count, or a script
+/// length-prefix drift: a varint written for the wrong count, or a script
 /// length that disagrees with the script that follows.
 #[test]
 fn serialized_transaction_has_no_trailing_or_missing_bytes() {

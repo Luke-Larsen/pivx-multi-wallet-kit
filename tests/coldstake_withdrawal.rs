@@ -6,7 +6,7 @@
 //! 1. The sighash commits to the **P2CS** `scriptPubKey`, not a P2PKH one. Sign
 //!    against the wrong prevout script and the signature is well-formed,
 //!    verifies against nothing the network will check, and the transaction is
-//!    rejected — with the coins still locked.
+//!    rejected, with the coins still locked.
 //! 2. The redeem script carries `OP_FALSE` to select the owner branch. Omit it
 //!    and the script takes the staking branch, comparing the owner's key hash
 //!    against the staker's.
@@ -83,7 +83,7 @@ fn withdrawal_signs_against_the_p2cs_script() {
     assert_eq!(tx.inputs.len(), 1);
     assert_eq!(tx.outputs.len(), 2, "destination + change");
 
-    // Destination is an ordinary P2PKH output — the delegation is over.
+    // Destination is an ordinary P2PKH output: the delegation is over.
     assert_eq!(tx.outputs[0].script_pubkey.len(), 25);
     assert!(!is_p2cs(&tx.outputs[0].script_pubkey));
     assert_eq!(tx.outputs[0].value, 200_000_000);
@@ -115,7 +115,7 @@ fn every_withdrawal_input_carries_the_owner_branch_selector() {
         let (_, _, has_selector) = split_script_sig(&input.script_sig);
         assert!(
             has_selector,
-            "input {i}: no OP_FALSE — this redeem script selects the staking branch"
+            "input {i}: no OP_FALSE: this redeem script selects the staking branch"
         );
     }
 }
@@ -151,7 +151,7 @@ fn ordinary_spends_do_not_carry_the_selector() {
 }
 
 /// A signature made against a P2PKH preimage must NOT validate under the P2CS
-/// prevout. This is what proves the previous test is not passing by accident —
+/// prevout. This is what proves the previous test is not passing by accident:
 /// the two preimages genuinely differ.
 #[test]
 fn a_p2pkh_preimage_would_not_satisfy_the_p2cs_input() {
@@ -176,7 +176,7 @@ fn a_p2pkh_preimage_would_not_satisfy_the_p2cs_input() {
     .is_err();
     assert!(
         panicked,
-        "the signature verified under a P2PKH preimage too — the sighash is not committing to \
+        "the signature verified under a P2PKH preimage too: the sighash is not committing to \
          the P2CS script"
     );
 }
@@ -305,7 +305,7 @@ fn rejects_invalid_withdrawals() {
         create_coldstake_withdrawal(&seed(), 0, 0, std::slice::from_ref(&good), &to, 0).is_err()
     );
 
-    // Missing script — the sighash needs it and it cannot be inferred.
+    // Missing script: the sighash needs it and it cannot be inferred.
     let mut no_script = good.clone();
     no_script.script = String::new();
     let err = create_coldstake_withdrawal(&seed(), 0, 0, &[no_script], &to, 1_000)
@@ -354,7 +354,7 @@ fn rejects_invalid_withdrawals() {
     );
 }
 
-/// A V6-variant delegation must be withdrawable too — both variants are
+/// A V6-variant delegation must be withdrawable too: both variants are
 /// spendable by the same owner path.
 #[test]
 fn withdraws_a_v6_variant_delegation() {
