@@ -414,11 +414,16 @@ fn parse_blockbook_utxos_handles_string_and_number_values() {
     assert_eq!(utxos[1].vout, 2);
 }
 
-#[test]
 /// Blockbook lists the same UTXO twice while a transaction is confirming —
 /// once from its mempool view (height 0) and once as confirmed. Observed
 /// live on mainnet. Ingesting both doubles the apparent balance and makes the
 /// builder spend one outpoint twice, which the network rejects.
+///
+/// Distinct from `parse_blockbook_utxos_handles_string_and_number_values`,
+/// which the assertion count makes it resemble: that one checks `value` parses
+/// from either a JSON string or a number, across two *already distinct*
+/// outpoints. This one starts with four entries covering two real outpoints and
+/// checks they collapse. Both land on `len() == 2`, by different routes.
 #[test]
 fn parse_blockbook_utxos_deduplicates_outpoints() {
     let txid = "7f0754fe17519180f97538a80b5018ed861770bd6804fc8ca8c84ad1a86f59b8";
