@@ -462,6 +462,29 @@ pub fn estimate_delegation_fee(
 /// supplied UTXO is spent; any remainder after fee returns to the owner address
 /// as change.
 ///
+/// # A delegated outpoint can be consumed by the staker
+///
+/// Unlike an ordinary output, which only its owner can spend, a delegated
+/// output can be consumed at any moment by the staking node — that is what
+/// staking *is*. Core's `CheckColdStake` constrains what the staker may do with
+/// it: the spend must be a coinstake with a single input, every output must
+/// carry the identical `scriptPubKey` it is spending (bar the last one under the
+/// LOF variant, reserved for masternode and budget payments), and the value
+/// returned must be at least the value taken. So the staker cannot move the
+/// coins, cannot redirect them, and cannot reduce them. **The delegation
+/// survives with the same owner and at least the same value.**
+///
+/// What does change is the outpoint. The old `(txid, vout)` is spent and the
+/// delegation reappears at a new one. A withdrawal built against the old
+/// reference is then rejected by the network for spending an output that no
+/// longer exists.
+///
+/// Nothing is lost when that happens, and no funds are at risk — but consumers
+/// should refresh their UTXO set immediately before building a withdrawal, and
+/// treat a missing-inputs rejection as "re-fetch and rebuild" rather than an
+/// error in the transaction. This crate performs no I/O, so it cannot detect
+/// staleness on the caller's behalf.
+///
 /// Each UTXO's `script` field must carry the hex `scriptPubKey` of the P2CS
 /// output being spent. That is not optional bookkeeping — the sighash commits to
 /// the exact script, so it cannot be inferred, and `parse_blockbook_utxos`

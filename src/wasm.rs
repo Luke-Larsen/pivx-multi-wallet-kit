@@ -568,6 +568,15 @@ impl Wallet {
     /// `fromChange` / `fromIndex` select the HD slot that owns the delegation.
     /// A mismatch is rejected up front rather than producing a transaction the
     /// network would refuse.
+    ///
+    /// **Refresh your UTXO set immediately before calling this.** A delegated
+    /// output can be consumed by the staking node at any time — that is what
+    /// staking is — which spends the outpoint and recreates the delegation at a
+    /// new one. Consensus forbids the staker from moving, redirecting or
+    /// reducing the coins, so nothing is at risk and the delegation survives
+    /// with the same owner; but a withdrawal built against a stale
+    /// `(txid, vout)` will be rejected for spending an output that no longer
+    /// exists. Treat that rejection as "re-fetch and rebuild".
     #[wasm_bindgen(js_name = withdrawColdStake)]
     pub fn withdraw_cold_stake(
         &self,
