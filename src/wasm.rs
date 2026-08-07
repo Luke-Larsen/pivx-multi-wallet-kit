@@ -388,7 +388,7 @@ impl Wallet {
     /// `parseBlockbookUtxos` → `setUtxos`.
     ///
     /// Cold-staking consumers must populate each entry's `script` on the way
-    /// through, which takes a second explorer call; see [`parse_blockbook_utxos`].
+    /// through, which takes a second explorer call; see `parseBlockbookUtxos`.
     #[wasm_bindgen(js_name = setUtxos)]
     pub fn set_utxos(&mut self, utxos: UtxosInput) {
         self.inner.unspent_utxos = utxos.utxos;
@@ -1114,23 +1114,38 @@ pub fn parse_shield_stream(
 /// `scriptPubKey`, and without it a delegation is indistinguishable from an
 /// ordinary output: `delegatedBalanceSat()` reads 0 and `withdrawColdStake`
 /// has nothing to sign against. Join `/api/v2/tx/{txid}` → `vout[n].hex` onto
-/// each entry first, under `script`, `scriptPubKey` or `hex`:
+/// each entry first, under `script`, `scriptPubKey` or `hex`.
+///
+/// The same responses also say whether the funding transaction was a coinstake,
+/// which is what a staked delegation becomes. Carry that across as `coinstake`
+/// (with the explorer's `confirmations`) and no builder will spend one before it
+/// matures. Both fields default to "ordinary, spendable" when omitted.
 ///
 /// ```js
 /// const utxos = await (await fetch(`${EXPLORER}/api/v2/utxo/${addr}`)).json();
 ///
-/// // One fetch per distinct funding tx, not per UTXO.
-/// const txs = await Promise.all(
-///   [...new Set(utxos.map((u) => u.txid))].map((id) =>
-///     fetch(`${EXPLORER}/api/v2/tx/${id}`).then((r) => r.json()),
-///   ),
-/// );
+/// // One fetch per distinct funding tx, not per UTXO, and bounded: a delegation
+/// // that has been staking a while has one output per stake, so an unbounded
+/// // Promise.all over a few hundred of them exhausts the connection pool.
+/// // `mapWithLimit` is in examples/web-wallet/app.js.
+/// const txs = await mapWithLimit([...new Set(utxos.map((u) => u.txid))], 6, (id) =>
+///   fetch(`${EXPLORER}/api/v2/tx/${id}`).then((r) => r.json()));
+///
+/// // PIVX marks a coinstake with an empty zero-value first output, and unlike a
+/// // coinbase it always spends a real input.
+/// const isCoinstakeTx = (tx) =>
+///   tx.vout.length >= 2 && tx.vout[0].value === '0' && !!tx.vin?.[0]?.txid;
+///
 /// const scripts = new Map();
 /// for (const tx of txs) for (const o of tx.vout) scripts.set(`${tx.txid}:${o.n}`, o.hex);
+/// const coinstakeTxids = new Set(txs.filter(isCoinstakeTx).map((tx) => tx.txid));
 ///
-/// wallet.setUtxos(parseBlockbookUtxos(
-///   utxos.map((u) => ({ ...u, script: scripts.get(`${u.txid}:${u.vout}`) ?? '' })),
-/// ));
+/// wallet.setUtxos(parseBlockbookUtxos(utxos.map((u) => ({
+///   ...u,
+///   script: scripts.get(`${u.txid}:${u.vout}`) ?? '',
+///   coinstake: coinstakeTxids.has(u.txid),
+///   confirmations: u.confirmations,
+/// }))));
 /// ```
 #[wasm_bindgen(js_name = parseBlockbookUtxos)]
 pub fn parse_blockbook_utxos(raw: JsValue) -> Result<BlockbookUtxosOut, JsError> {

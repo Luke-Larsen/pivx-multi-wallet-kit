@@ -31,7 +31,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 
 | Module                          | Purpose                                                                    |
 |---------------------------------|----------------------------------------------------------------------------|
-| `params`                        | PIVX chain constants: coin type, prefixes, Sapling param SHA256 hashes     |
+| `params`                        | PIVX chain constants: coin type, prefixes, coinbase maturity, Sapling param SHA256 hashes |
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
 | `checkpoints`                   | Embedded mainnet checkpoint data for fast initial sync                     |
 | `keys`                          | BIP32/BIP44 derivation, Sapling ZIP32 keys, transparent address encoding   |
@@ -56,7 +56,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (55 total: 14 unit + 2 messages + 39 integration with real
+# Tests (199 total: 16 unit + 183 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -320,6 +320,15 @@ MyPIVXWallet rather than reconstructed, and the delegate → withdraw cycle is c
 on mainnet (blocks 5522082 and 5522083). A wrong P2CS script does not fail loudly: it
 produces an output that is either unspendable or spendable by the wrong party.
 
+**Staked delegations are handled too**, which is the state a delegation spends almost
+all of its life in: staking consumes the delegation and recreates it inside a coinstake
+transaction, immature for 100 blocks. Populate `coinstake` and `confirmations` on each
+UTXO and no builder will select one before it matures, with `immatureBalanceSat` for what
+is being held back. See [Staked delegations are coinstake
+outputs](#staked-delegations-are-coinstake-outputs). The rule is checked against Core's
+own consensus and wallet arithmetic in `tests/coinstake_maturity.rs`; it has not yet been
+observed against a live node, since a mainnet stake can take weeks to arrive.
+
 **One behaviour changed for everyone, not just cold staking.** PIVX rejects any output
 worth less than it costs to spend: `IsStandardTx` fails with `reason = "dust"`, so no
 node relays the transaction. The crate had no notion of this and would build
@@ -327,8 +336,16 @@ transactions nothing would accept. See *Upgrading to 0.4.0*.
 
 ### Upgrading to 0.4.0
 
-The cold-staking API is entirely new; nothing existing changed shape. Two behaviours
-differ:
+The cold-staking API is entirely new. One existing type changed shape:
+
+0. **`SerializedUTXO` gained `coinstake` and `confirmations`.** Both default to
+   "ordinary, immediately spendable", so behaviour is unchanged unless you populate them.
+   - *Rust consumers*: this is a breaking change if you build the struct with a literal.
+     Add `..Default::default()` (the type now derives `Default`) or set the two fields.
+   - *JS/TS consumers*: both are optional in the generated types. Nothing to do.
+   - *Persisted wallets*: older JSON deserializes unchanged and reads as mature.
+
+Two behaviours differ:
 
 1. **Dust outputs are now handled.** The threshold is 5460 sat for an ordinary output
    (6240 for a cold-staking one). Recipients below it are **rejected** rather than

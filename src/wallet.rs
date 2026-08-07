@@ -44,7 +44,7 @@ pub struct SerializedUTXO {
     pub script: String,
     pub height: u32,
     /// Whether this output was created by a coinstake transaction, which makes
-    /// it subject to [`COINBASE_MATURITY`]. Defaults to `false`, so a consumer
+    /// it subject to [`crate::params::COINBASE_MATURITY`]. Defaults to `false`, so a consumer
     /// that never sets it sees exactly the pre-maturity behaviour.
     ///
     /// A staked cold-staking delegation lands here: staking consumes the
