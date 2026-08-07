@@ -49,6 +49,7 @@ fn delegated_utxo(letter: &str, vout: u32, amount: u64, change: u32, index: u32)
         amount,
         script: simd::hex::bytes_to_hex_string(&script),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 
@@ -133,6 +134,7 @@ fn ordinary_spends_do_not_carry_the_selector() {
         amount: 100_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     };
     let result = create_raw_transparent_transaction_from_utxos_to_many(
         &seed(),
@@ -191,6 +193,7 @@ fn delegate_then_withdraw_round_trip() {
         amount: 500_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }]);
 
     let delegation =
@@ -207,6 +210,7 @@ fn delegate_then_withdraw_round_trip() {
         amount: value,
         script: simd::hex::bytes_to_hex_string(&p2cs_script),
         height: 5_000_001,
+        ..Default::default()
     };
 
     let withdrawal = create_coldstake_withdrawal(
@@ -361,6 +365,7 @@ fn withdraws_a_v6_variant_delegation() {
         amount: 500_000_000,
         script: simd::hex::bytes_to_hex_string(&script),
         height: 5_000_000,
+        ..Default::default()
     };
 
     let result = create_coldstake_withdrawal(

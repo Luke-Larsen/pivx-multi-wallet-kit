@@ -468,6 +468,144 @@ fn parse_blockbook_utxos_keeps_distinct_vouts_of_one_txid() {
     assert_eq!(parsed.iter().map(|u| u.amount).sum::<u64>(), 5_000);
 }
 
+/// The script is what makes a delegation visible, and it only reaches the
+/// parser because the caller joined `/api/v2/tx/{txid}` → `vout[n].hex` onto the
+/// entry. It arrives under whichever name the caller reached for, so all three
+/// spellings are accepted, including Core's verbose-RPC object form.
+///
+/// The P2CS script here is the real one from mainnet tx `7e4dc5b0…` vout 0.
+#[test]
+fn parse_blockbook_utxos_keeps_a_joined_script() {
+    const P2CS: &str = "76a97b63d1146d4b7c154c916817fe70c4f1f2d7959660ec72d367146d4b7c154c916817fe70c4f1f2d7959660ec72d36888ac";
+    const P2PKH: &str = "76a9146d4b7c154c916817fe70c4f1f2d7959660ec72d388ac";
+
+    let raw = vec![
+        serde_json::json!({
+            "txid": "a".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "script": P2CS,
+        }),
+        // `hex` is the field's name on the tx endpoint it gets copied from.
+        serde_json::json!({
+            "txid": "b".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "hex": P2PKH,
+        }),
+        serde_json::json!({
+            "txid": "c".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "scriptPubKey": P2CS,
+        }),
+        // Core's `getrawtransaction` verbose shape nests it.
+        serde_json::json!({
+            "txid": "d".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "scriptPubKey": { "hex": P2CS, "asm": "OP_DUP OP_HASH160 OP_ROT" },
+        }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(parsed.len(), 4);
+    let scripts: Vec<&str> = parsed.iter().map(|u| u.script.as_str()).collect();
+    assert_eq!(scripts, [P2CS, P2PKH, P2CS, P2CS]);
+
+    let delegated: Vec<bool> = parsed.iter().map(wallet::is_delegated_utxo).collect();
+    assert_eq!(
+        delegated,
+        [true, false, true, true],
+        "a joined P2CS script must make the delegation visible"
+    );
+}
+
+/// `hex_string_to_bytes` is an unchecked SIMD decoder, so a malformed script
+/// must be dropped at the parse boundary rather than classified on garbage.
+/// Empty reads as "unknown", which `is_delegated_utxo` treats as ordinary.
+#[test]
+fn parse_blockbook_utxos_drops_a_malformed_script() {
+    let cases = [
+        serde_json::json!("76a9146d4b7c154c916817fe70c4f1f2d7959660ec72d388a"), // odd length
+        serde_json::json!("76a914zzzz"),                                        // not hex
+        serde_json::json!(""),
+        serde_json::json!(76),   // wrong JSON type
+        serde_json::json!(null), // explicit null
+    ];
+
+    for (i, script) in cases.iter().enumerate() {
+        let raw = vec![serde_json::json!({
+            "txid": "a".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "script": script,
+        })];
+        let parsed = wallet::parse_blockbook_utxos(&raw);
+        assert_eq!(parsed.len(), 1, "case {i}: the UTXO itself must survive");
+        assert!(parsed[0].script.is_empty(), "case {i}: {script} must not be kept");
+    }
+}
+
+/// Staking a delegation consumes it and recreates it inside a coinstake
+/// transaction, so the *steady state* of a live delegation is a coinstake
+/// output, not the original delegation. Consensus makes the staker reproduce the
+/// identical `scriptPubKey`, so the delegation must still be recognised.
+///
+/// The fixture is the real shape from mainnet: a coinstake's zero-value marker
+/// output at vout 0 (a 1-byte `f8` script, which is valid hex and would parse),
+/// then the recreated P2CS at vout 1. Verified against a live owner address
+/// whose 100 UTXOs were 99 coinstake-derived delegations sharing one script.
+#[test]
+fn parse_blockbook_utxos_reads_a_staked_delegation() {
+    // Block 5531445, staking SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy for owner
+    // D73WnKZ4aEQE9WqsGLYX7D8yff6jjYcnic.
+    const STAKED: &str = "76a97b63d114b3be8567d0190c67ca4675a0019089c55fe695f9671414e1fe0c6e2bcceda58bc7c0a3055907aaa561e56888ac";
+    let txid = "cf0cbc0816d9306ccb52c6ae2cf4a2ca4dcf1aaa44b429775d94e91bc2a0427c";
+
+    let raw = vec![
+        // The coinstake marker: value 0, so it is not a UTXO at all.
+        serde_json::json!({ "txid": txid, "vout": 0, "value": "0", "height": 5_531_445, "script": "f8" }),
+        serde_json::json!({ "txid": txid, "vout": 1, "value": "51600000000", "height": 5_531_445, "script": STAKED }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(parsed.len(), 1, "the zero-value coinstake marker must be skipped");
+    assert_eq!(parsed[0].vout, 1, "the join must not shift with vout 0 dropped");
+    assert!(
+        wallet::is_delegated_utxo(&parsed[0]),
+        "a restaked delegation must still read as delegated"
+    );
+
+    // Cross-check against what the explorer independently reported for this
+    // output: it lists both addresses, staker first.
+    let bytes = pivx_wallet_kit::simd::hex::hex_string_to_bytes(&parsed[0].script);
+    let (staking, owner) =
+        pivx_wallet_kit::transparent::coldstake::addresses_from_p2cs_script(&bytes).unwrap();
+    assert_eq!(staking, "SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy");
+    assert_eq!(owner, "D73WnKZ4aEQE9WqsGLYX7D8yff6jjYcnic");
+}
+
+/// A caller joining scripts on may only have covered one of the two sightings
+/// the explorer emits mid-confirmation. Losing the script to the dedupe would
+/// hide a delegation, so the non-empty one must win regardless of which
+/// sighting carried it.
+#[test]
+fn parse_blockbook_utxos_dedupe_keeps_the_known_script() {
+    const P2CS: &str = "76a97b63d1146d4b7c154c916817fe70c4f1f2d7959660ec72d367146d4b7c154c916817fe70c4f1f2d7959660ec72d36888ac";
+    let txid = "a".repeat(64);
+
+    // Script on the second sighting, then on the first: order must not matter.
+    for scripts in [["", P2CS], [P2CS, ""]] {
+        let raw: Vec<serde_json::Value> = scripts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                serde_json::json!({
+                    "txid": txid, "vout": 4, "value": "1000",
+                    "height": if i == 0 { 0 } else { 5_519_222 },
+                    "script": s,
+                })
+            })
+            .collect();
+
+        let parsed = wallet::parse_blockbook_utxos(&raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].script, P2CS, "the known script must survive the dedupe");
+        assert!(wallet::is_delegated_utxo(&parsed[0]));
+    }
+}
+
 #[test]
 fn parse_blockbook_utxos_skips_zero_and_empty() {
     let raw = vec![
@@ -668,6 +806,7 @@ fn transparent_to_transparent_tx_needs_no_prover() {
         amount: 500_000_000, // 5 PIV
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     });
 
     // Destination is the same wallet's transparent address — guaranteed to
@@ -716,6 +855,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
         amount: 100_000_000, // 1 PIV
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
 
     // Send 0.5 PIV to a different address; the rest is fee + change
@@ -763,6 +903,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         amount: 100_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
 
@@ -814,6 +955,7 @@ fn raw_transparent_from_utxos_insufficient_balance_fails() {
         amount: 1_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     let err = create_raw_transparent_transaction_from_utxos(
@@ -852,6 +994,7 @@ fn transparent_to_shield_requires_prover() {
         amount: 500_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     });
 
     // Destination is a shield address; prover_for_shield = None must error.

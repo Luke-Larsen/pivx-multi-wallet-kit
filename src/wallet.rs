@@ -31,7 +31,11 @@ pub struct SerializedNote {
 }
 
 /// A transparent unspent transaction output.
-#[derive(Serialize, Deserialize, Clone, tsify::Tsify)]
+///
+/// [`Default`] is derived so the maturity fields can be left off with
+/// `..Default::default()`; the defaults (`coinstake: false`, `confirmations: 0`)
+/// mean "an ordinary, immediately spendable output".
+#[derive(Serialize, Deserialize, Clone, Default, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct SerializedUTXO {
     pub txid: String,
@@ -39,17 +43,48 @@ pub struct SerializedUTXO {
     pub amount: u64,
     pub script: String,
     pub height: u32,
+    /// Whether this output was created by a coinstake transaction, which makes
+    /// it subject to [`COINBASE_MATURITY`]. Defaults to `false`, so a consumer
+    /// that never sets it sees exactly the pre-maturity behaviour.
+    ///
+    /// A staked cold-staking delegation lands here: staking consumes the
+    /// delegation and recreates it inside a coinstake, so this is the *normal*
+    /// state of a delegation that has been earning for any length of time.
+    #[serde(default)]
+    #[tsify(optional)]
+    pub coinstake: bool,
+    /// Depth in the main chain, as reported by the explorer this UTXO came
+    /// from. Only consulted when `coinstake` is set; see
+    /// [`SerializedUTXO::is_mature`].
+    ///
+    /// A stale value is safe in the direction that matters: confirmations only
+    /// grow, so an old reading understates depth and holds an output back
+    /// slightly longer than necessary rather than releasing it early.
+    #[serde(default)]
+    #[tsify(optional)]
+    pub confirmations: u32,
 }
 
-/// Parse a list of UTXOs from a Blockbook API v2 `/api/v2/utxo/{address}` response.
-///
-/// Accepts amounts as either a string (`"12345"`) or a JSON number — both
-/// forms appear in the wild depending on the Blockbook revision. UTXOs with
-/// empty txids or zero amounts are skipped.
-///
-/// `script` is left empty because Blockbook doesn't always include scripts
-/// and consumers that need them can reconstruct P2PKH from the spending
-/// wallet's address.
+impl SerializedUTXO {
+    /// Whether the network will accept a spend of this output right now.
+    ///
+    /// Only coinstake and coinbase outputs are ever immature; everything else
+    /// is spendable as soon as it exists. An immature output is not lost, it is
+    /// waiting: the count rises one per block.
+    pub fn is_mature(&self) -> bool {
+        !self.coinstake || self.confirmations > crate::params::COINBASE_MATURITY
+    }
+
+    /// Blocks remaining until [`SerializedUTXO::is_mature`] turns true.
+    pub fn blocks_until_mature(&self) -> u32 {
+        if self.is_mature() {
+            0
+        } else {
+            (crate::params::COINBASE_MATURITY + 1).saturating_sub(self.confirmations)
+        }
+    }
+}
+
 /// Whether a UTXO is a cold-staking delegation rather than an ordinary output.
 ///
 /// Requires the `script` field: a P2CS output is recognisable only from its
@@ -64,6 +99,54 @@ pub fn is_delegated_utxo(utxo: &SerializedUTXO) -> bool {
     crate::transparent::coldstake::is_p2cs(&crate::simd::hex::hex_string_to_bytes(&utxo.script))
 }
 
+/// The hex `scriptPubKey` carried on a UTXO entry, or empty if absent or
+/// malformed.
+///
+/// No explorer serves this on its UTXO endpoint, so it is only ever present
+/// because the caller joined it on themselves; see [`parse_blockbook_utxos`]
+/// for where it comes from. `hex` is accepted because that is the name the
+/// field has on the tx endpoint it gets copied from, and `scriptPubKey` may
+/// arrive either flat or as Core's verbose-RPC object.
+fn utxo_script_hex(u: &serde_json::Value) -> String {
+    let raw = u["script"]
+        .as_str()
+        .or_else(|| u["scriptPubKey"].as_str())
+        .or_else(|| u["scriptPubKey"]["hex"].as_str())
+        .or_else(|| u["hex"].as_str())
+        .unwrap_or_default();
+
+    // `hex_string_to_bytes` is an unchecked SIMD decoder: an odd length drops a
+    // trailing nibble and a non-hex byte decodes to garbage, neither loudly. A
+    // malformed script that reached `is_delegated_utxo` would be classified on
+    // that garbage, so it is dropped to empty here instead, which reads as
+    // "unknown" and is the direction that stays safe.
+    if raw.is_empty() || !raw.len().is_multiple_of(2) || !raw.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return String::new();
+    }
+    raw.to_ascii_lowercase()
+}
+
+/// Parse a list of UTXOs from a Blockbook API v2 `/api/v2/utxo/{address}` response.
+///
+/// Accepts amounts as either a string (`"12345"`) or a JSON number, both of
+/// which appear in the wild depending on the Blockbook revision. UTXOs with
+/// empty txids or zero amounts are skipped.
+///
+/// # Scripts
+///
+/// The UTXO endpoint carries no `scriptPubKey`, on Blockbook or on its
+/// work-alikes (rusty-blox included), so `script` is normally empty and
+/// consumers that only build ordinary sends reconstruct P2PKH from their own
+/// address.
+///
+/// Cold staking cannot do that. A P2CS output is recognisable only from its
+/// script, and the sighash commits to the exact bytes, so those consumers must
+/// join a second call onto each entry before calling this:
+/// `/api/v2/tx/{txid}` returns `vout[n].hex`, the scriptPubKey of outpoint
+/// `(txid, n)`. Entries are read for `script`, `scriptPubKey` or `hex`, so the
+/// field can be copied across under whichever name is handiest. Anything that
+/// is not valid even-length hex is treated as absent.
 pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
     let mut utxos: Vec<SerializedUTXO> = Vec::new();
     for u in raw {
@@ -75,6 +158,13 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
             .or_else(|| u["value"].as_u64())
             .unwrap_or(0);
         let height = u["height"].as_u64().unwrap_or(0) as u32;
+        let script = utxo_script_hex(u);
+        // Explorers differ on whether they flag coinstake outputs at all
+        // (Blockbook's UTXO entries carry no such field), so this is normally
+        // set by the caller from the same tx responses that supplied `script`.
+        // Absent means "not a coinstake", which preserves prior behaviour.
+        let coinstake = u["coinstake"].as_bool().unwrap_or(false);
+        let confirmations = u["confirmations"].as_u64().unwrap_or(0) as u32;
 
         if txid.is_empty() || amount == 0 {
             continue;
@@ -100,6 +190,18 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
             // Prefer the confirmed sighting's height — the mempool copy
             // reports 0, which would misrepresent the UTXO's age.
             existing.height = existing.height.max(height);
+            // A caller joining scripts on may have covered only one of the two
+            // sightings. An empty script is "unknown", never a correction, so
+            // it must not overwrite one we already have.
+            if existing.script.is_empty() {
+                existing.script = script;
+            }
+            // Same reasoning for maturity: the mempool sighting reports 0
+            // confirmations, and taking the lower of the two would hold a
+            // mature output back. `coinstake` is a property of the funding
+            // transaction, so either sighting asserting it settles it.
+            existing.confirmations = existing.confirmations.max(confirmations);
+            existing.coinstake |= coinstake;
             continue;
         }
 
@@ -107,8 +209,10 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
             txid,
             vout,
             amount,
-            script: String::new(),
+            script,
             height,
+            coinstake,
+            confirmations,
         });
     }
     utxos
@@ -200,17 +304,36 @@ impl WalletData {
     /// [`WalletData::get_delegated_balance`] for the other half, and
     /// `withdrawColdStake` to move it.
     ///
-    /// Detection needs each UTXO's `script`. Explorers do not always supply one
-    /// — Blockbook's UTXO endpoint omits it — and
-    /// [`parse_blockbook_utxos`] leaves the field empty, in which case a
-    /// delegated output is indistinguishable from an ordinary one and is
-    /// counted here. Consumers that use cold staking should populate `script`.
+    /// Detection needs each UTXO's `script`, which no explorer supplies on its
+    /// UTXO endpoint. When it is absent a delegated output is indistinguishable
+    /// from an ordinary one and is counted here, so consumers that use cold
+    /// staking must join it on from `/api/v2/tx/{txid}` before parsing; see
+    /// [`parse_blockbook_utxos`].
+    ///
+    /// Immature coinstake outputs are excluded for the same reason: no send can
+    /// reach them yet. See [`WalletData::get_immature_balance`]. A UTXO that
+    /// never had `coinstake` set counts as mature, so this is unchanged for
+    /// consumers that do not populate the field.
     pub fn get_transparent_balance(&self) -> u64 {
         self.unspent_utxos
             .iter()
-            .filter(|u| !is_delegated_utxo(u))
+            .filter(|u| !is_delegated_utxo(u) && u.is_mature())
             .map(|u| u.amount)
             .sum()
+    }
+
+    /// Value held in outputs that exist but cannot be spent yet, because they
+    /// come from a coinstake or coinbase that has not reached
+    /// [`crate::params::COINBASE_MATURITY`].
+    ///
+    /// Reported separately rather than folded into either balance so a UI can
+    /// say "arriving in N blocks" instead of showing coins that vanish and
+    /// reappear. Includes immature delegations, which are also counted in
+    /// [`WalletData::get_delegated_balance`]: the two overlap by design, since
+    /// one answers "what do I hold" and this one answers "what is still
+    /// landing".
+    pub fn get_immature_balance(&self) -> u64 {
+        self.unspent_utxos.iter().filter(|u| !u.is_mature()).map(|u| u.amount).sum()
     }
 
     /// Balance held in cold-staking delegations, redeemable via
@@ -218,6 +341,13 @@ impl WalletData {
     ///
     /// Only counts UTXOs whose `script` is populated and parses as P2CS; see
     /// the note on [`WalletData::get_transparent_balance`].
+    ///
+    /// This is a *balance*, not a spendable amount. Staking a delegation
+    /// replaces it with a coinstake output that PIVX will not let anyone spend
+    /// for 100 blocks, and that immature output is counted here because the
+    /// coins are genuinely held. The withdrawal builder refuses it until it
+    /// matures; see [`WalletData::get_immature_balance`] for how much is in
+    /// that state.
     pub fn get_delegated_balance(&self) -> u64 {
         self.unspent_utxos
             .iter()

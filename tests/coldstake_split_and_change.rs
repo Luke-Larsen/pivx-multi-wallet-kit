@@ -39,7 +39,7 @@ fn staking_addr() -> String {
 }
 
 fn utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
-    SerializedUTXO { txid: letter.repeat(64), vout, amount, script: String::new(), height: 5_000_000 }
+    SerializedUTXO { txid: letter.repeat(64), vout, amount, script: String::new(), height: 5_000_000, ..Default::default() }
 }
 
 fn delegated_utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
@@ -50,6 +50,7 @@ fn delegated_utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: simd::hex::bytes_to_hex_string(&script),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 

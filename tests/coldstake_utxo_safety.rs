@@ -8,11 +8,12 @@
 //! network rejects: the signature would be made against a P2PKH preimage while
 //! the output being spent is P2CS.
 //!
-//! Detection requires the UTXO's `script`. Blockbook's UTXO endpoint omits it
-//! and `parse_blockbook_utxos` leaves the field empty, so when the script is
-//! absent a delegated output is genuinely indistinguishable from an ordinary
-//! one. These tests pin the behaviour for the case where it *is* known, which is
-//! the case a cold-staking consumer can and should arrange.
+//! Detection requires the UTXO's `script`, which no explorer returns from its
+//! UTXO endpoint, so when the script is absent a delegated output is genuinely
+//! indistinguishable from an ordinary one. These tests pin the behaviour for the
+//! case where it *is* known, which is the case a cold-staking consumer can and
+//! should arrange, by joining `/api/v2/tx/{txid}` → `vout[n].hex` onto each
+//! entry before `parse_blockbook_utxos` sees it.
 
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
@@ -44,6 +45,7 @@ fn ordinary(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 
@@ -55,6 +57,7 @@ fn delegated(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: simd::hex::bytes_to_hex_string(&script),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 

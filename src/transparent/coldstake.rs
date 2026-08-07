@@ -485,11 +485,22 @@ pub fn estimate_delegation_fee(
 /// error in the transaction. This crate performs no I/O, so it cannot detect
 /// staleness on the caller's behalf.
 ///
+/// The replacement is also *immature*. It lives in a coinstake transaction, and
+/// PIVX applies [`crate::params::COINBASE_MATURITY`] to those, so it cannot be
+/// spent until it is 100 blocks deep. Explorers list it long before that, in the
+/// same shape as any other UTXO, so a freshly staked delegation looks perfectly
+/// spendable and is not.
+///
+/// This is rejected here rather than by the network, but only when the caller
+/// populates `coinstake` and `confirmations` on the UTXO, since this crate performs
+/// no I/O and cannot determine either for itself. The same tx responses that
+/// supply `script` identify a coinstake, by its empty zero-value first output.
+///
 /// Each UTXO's `script` field must carry the hex `scriptPubKey` of the P2CS
-/// output being spent. That is not optional bookkeeping — the sighash commits to
-/// the exact script, so it cannot be inferred, and `parse_blockbook_utxos`
-/// leaves the field empty. Callers fetch it from their explorer alongside the
-/// outpoint.
+/// output being spent. That is not optional bookkeeping: the sighash commits to
+/// the exact script, so it cannot be inferred. No explorer returns it from the
+/// UTXO endpoint, so callers fetch it separately, from `/api/v2/tx/{txid}` as
+/// `vout[n].hex`, and hand it to `parse_blockbook_utxos` alongside the outpoint.
 ///
 /// The owner hash in every script must match the key at `from_change/from_index`,
 /// or the wallet cannot produce a signature that satisfies the output. That is
@@ -573,6 +584,22 @@ pub fn create_coldstake_withdrawal_with_change(
                 "UTXO {}:{} has no script — withdrawing a delegation needs the P2CS \
                  scriptPubKey, which the sighash commits to and cannot be inferred",
                 utxo.txid, utxo.vout
+            )
+            .into());
+        }
+        // A staked delegation lives in a coinstake, so this is the routine case
+        // rather than an exotic one: withdraw too soon after a stake and the
+        // network rejects the spend. Erroring names the wait instead, since
+        // every one of these clears on its own.
+        if !utxo.is_mature() {
+            return Err(format!(
+                "UTXO {}:{} was created by a coinstake {} block(s) ago and needs {}. It was \
+                 staked recently, so it becomes withdrawable in {} block(s)",
+                utxo.txid,
+                utxo.vout,
+                utxo.confirmations,
+                crate::params::COINBASE_MATURITY + 1,
+                utxo.blocks_until_mature(),
             )
             .into());
         }
@@ -711,15 +738,24 @@ fn select_for_delegation(
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
     // A delegation is funded from ordinary outputs. Already-delegated ones are
-    // P2CS and cannot be re-delegated without first being withdrawn.
+    // P2CS and cannot be re-delegated without first being withdrawn, and
+    // immature coinstake outputs cannot be spent at all yet.
     let mut utxos: Vec<SerializedUTXO> = wallet
         .unspent_utxos
         .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
         .cloned()
         .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
+        let immature = wallet.get_immature_balance();
+        if immature > 0 {
+            return Err(format!(
+                "No spendable transparent UTXOs available to fund a delegation: {immature} sat \
+                 is in coinstake outputs that have not reached maturity yet"
+            )
+            .into());
+        }
         return Err("No spendable transparent UTXOs available to fund a delegation".into());
     }
 

@@ -197,19 +197,29 @@ fn select_transparent_utxos(
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
     // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
     // here would produce a transaction the network rejects. They remain
-    // redeemable via `create_coldstake_withdrawal`.
+    // redeemable via `create_coldstake_withdrawal`. Immature coinstake outputs
+    // are excluded for a different reason: they exist and are ours, but the
+    // network will not accept a spend of them until they are deep enough.
     let mut utxos: Vec<SerializedUTXO> = wallet
         .unspent_utxos
         .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
         .cloned()
         .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
         let delegated = wallet.get_delegated_balance();
+        let immature = wallet.get_immature_balance();
         if delegated > 0 {
             return Err(format!(
-                "No spendable transparent UTXOs — {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+                "No spendable transparent UTXOs: {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+            )
+            .into());
+        }
+        if immature > 0 {
+            return Err(format!(
+                "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
+                 have not reached maturity yet"
             )
             .into());
         }
@@ -352,19 +362,29 @@ pub fn create_shielding_transaction(
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
     // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
     // here would produce a transaction the network rejects. They remain
-    // redeemable via `create_coldstake_withdrawal`.
+    // redeemable via `create_coldstake_withdrawal`. Immature coinstake outputs
+    // are excluded for a different reason: they exist and are ours, but the
+    // network will not accept a spend of them until they are deep enough.
     let mut utxos: Vec<SerializedUTXO> = wallet
         .unspent_utxos
         .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u))
+        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
         .cloned()
         .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
         let delegated = wallet.get_delegated_balance();
+        let immature = wallet.get_immature_balance();
         if delegated > 0 {
             return Err(format!(
-                "No spendable transparent UTXOs — {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+                "No spendable transparent UTXOs: {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
+            )
+            .into());
+        }
+        if immature > 0 {
+            return Err(format!(
+                "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
+                 have not reached maturity yet"
             )
             .into());
         }
@@ -590,8 +610,8 @@ pub fn create_raw_transparent_transaction_to_many(
 ///
 ///  1. **Custom HD index.** Signs with the key at
 ///     `m/44'/119'/0'/from_change/from_index` rather than the wallet's
-///     default `(0, 0)`. Lets callers spend from any HD-derived address
-///     — useful for any consumer that maintains multiple receive
+///     default `(0, 0)`. Lets callers spend from any HD-derived address,
+///     which is useful for any consumer that maintains multiple receive
 ///     addresses (payment processors, hierarchical-deterministic
 ///     accounting, etc.).
 ///
@@ -663,6 +683,21 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
                 "UTXO {}:{} is delegated for cold staking and cannot be spent as an ordinary \
                  output — use create_coldstake_withdrawal to redeem it",
                 u.txid, u.vout
+            )
+            .into());
+        }
+        // Same reasoning: the caller named this set, so an immature input is
+        // reported rather than dropped. Unlike the delegated case this one
+        // resolves on its own, so the error says when.
+        if !u.is_mature() {
+            return Err(format!(
+                "UTXO {}:{} comes from a coinstake and is not mature. It has {} of the {} \
+                 confirmations needed, so it becomes spendable in {} block(s)",
+                u.txid,
+                u.vout,
+                u.confirmations,
+                crate::params::COINBASE_MATURITY + 1,
+                u.blocks_until_mature(),
             )
             .into());
         }

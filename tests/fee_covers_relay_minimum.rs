@@ -56,7 +56,7 @@ fn staking_addr() -> String {
 }
 
 fn utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
-    SerializedUTXO { txid: letter.repeat(64), vout, amount, script: String::new(), height: 5_000_000 }
+    SerializedUTXO { txid: letter.repeat(64), vout, amount, script: String::new(), height: 5_000_000, ..Default::default() }
 }
 
 fn delegated(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
@@ -67,6 +67,7 @@ fn delegated(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: simd::hex::bytes_to_hex_string(&script),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 
@@ -232,6 +233,7 @@ fn fee_holds_across_signature_length_variation() {
             amount: 500 * COIN,
             script: simd::hex::bytes_to_hex_string(&script),
             height: 5_000_000,
+            ..Default::default()
         }];
 
         let r = create_coldstake_withdrawal_with_change(

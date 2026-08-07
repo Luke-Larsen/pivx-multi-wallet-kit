@@ -27,3 +27,17 @@ pub const SPEND_PARAMS_SHA256: &str =
 
 /// SIGHASH_ALL flag byte appended to legacy (v1) transparent signature preimages.
 pub const SIGHASH_ALL: u32 = 1;
+
+/// Confirmations a coinbase or coinstake output needs before it may be spent.
+///
+/// PIVX Core's `CWalletTx::GetBlocksToMaturity` returns
+/// `(COINBASE_MATURITY + 1) - GetDepthInMainChain()` and applies it to coinstake
+/// outputs as well as coinbase ones, so an output is mature once its depth
+/// *exceeds* this value. (The 600 that appears in staking discussions is
+/// `nStakeMinDepth`, the depth an input needs before it may be used to stake.
+/// It is not a spend-maturity rule and does not belong here.)
+///
+/// This matters for cold staking specifically: staking a delegation consumes it
+/// and recreates it inside a coinstake transaction, so a live delegation spends
+/// most of its life as a coinstake output.
+pub const COINBASE_MATURITY: u32 = 100;

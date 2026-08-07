@@ -39,6 +39,7 @@ fn utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 

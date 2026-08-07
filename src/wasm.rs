@@ -310,6 +310,15 @@ impl Wallet {
     /// the field empty — so a consumer using cold staking must populate `script`
     /// for delegated outputs, or they will be counted as spendable and selected
     /// by ordinary sends, which the network then rejects.
+    /// Value in coinstake/coinbase outputs that exist but have not matured, so
+    /// no builder will spend them yet. Rises into `transparentBalanceSat` (or
+    /// stays delegated) as blocks arrive. Always 0 unless UTXOs carry
+    /// `coinstake` and `confirmations`.
+    #[wasm_bindgen(js_name = immatureBalanceSat)]
+    pub fn immature_balance_sat(&self) -> u64 {
+        self.inner.get_immature_balance()
+    }
+
     #[wasm_bindgen(js_name = delegatedBalanceSat)]
     pub fn delegated_balance_sat(&self) -> u64 {
         self.inner.get_delegated_balance()
@@ -377,6 +386,9 @@ impl Wallet {
 
     /// Replace the transparent UTXO set. Typical pattern: explorer →
     /// `parseBlockbookUtxos` → `setUtxos`.
+    ///
+    /// Cold-staking consumers must populate each entry's `script` on the way
+    /// through, which takes a second explorer call; see [`parse_blockbook_utxos`].
     #[wasm_bindgen(js_name = setUtxos)]
     pub fn set_utxos(&mut self, utxos: UtxosInput) {
         self.inner.unspent_utxos = utxos.utxos;
@@ -1097,6 +1109,29 @@ pub fn parse_shield_stream(
 /// `SerializedUTXO[]`. Input is the raw JSON array; the caller wires
 /// Blockbook's schema directly so we accept `any` to be permissive
 /// about minor shape drift on Blockbook's side.
+///
+/// **Cold staking needs one more fetch.** The UTXO endpoint returns no
+/// `scriptPubKey`, and without it a delegation is indistinguishable from an
+/// ordinary output: `delegatedBalanceSat()` reads 0 and `withdrawColdStake`
+/// has nothing to sign against. Join `/api/v2/tx/{txid}` → `vout[n].hex` onto
+/// each entry first, under `script`, `scriptPubKey` or `hex`:
+///
+/// ```js
+/// const utxos = await (await fetch(`${EXPLORER}/api/v2/utxo/${addr}`)).json();
+///
+/// // One fetch per distinct funding tx, not per UTXO.
+/// const txs = await Promise.all(
+///   [...new Set(utxos.map((u) => u.txid))].map((id) =>
+///     fetch(`${EXPLORER}/api/v2/tx/${id}`).then((r) => r.json()),
+///   ),
+/// );
+/// const scripts = new Map();
+/// for (const tx of txs) for (const o of tx.vout) scripts.set(`${tx.txid}:${o.n}`, o.hex);
+///
+/// wallet.setUtxos(parseBlockbookUtxos(
+///   utxos.map((u) => ({ ...u, script: scripts.get(`${u.txid}:${u.vout}`) ?? '' })),
+/// ));
+/// ```
 #[wasm_bindgen(js_name = parseBlockbookUtxos)]
 pub fn parse_blockbook_utxos(raw: JsValue) -> Result<BlockbookUtxosOut, JsError> {
     let raw: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(raw).map_err(js_err)?;

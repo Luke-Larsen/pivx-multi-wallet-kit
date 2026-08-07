@@ -158,7 +158,8 @@ const wallet = Wallet.fromMnemonic(phrase, currentHeight);
 const shield      = wallet.shieldAddress();
 const transparent = wallet.transparentAddress();
 
-// Sync transparent UTXOs from any Blockbook explorer.
+// Sync transparent UTXOs from any Blockbook explorer. Cold staking needs one
+// more call per funding tx; see "Cold staking needs scripts" below.
 const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json());
 wallet.setUtxos(parseBlockbookUtxos(raw));
 const transparentSat = wallet.transparentBalanceSat();
@@ -207,9 +208,8 @@ const delegation = wallet.delegateColdStake(stakingAddress, 200_000_000n);
 const partial = wallet.withdrawColdStakeKeepingRest(
   0, 0, { utxos: delegatedUtxos }, myAddress, 400_000_000n, stakingAddress);
 
-// Identify delegated outputs. Note that Blockbook's UTXO endpoint omits
-// scripts, so `parseBlockbookUtxos` cannot populate them — fetch each funding
-// transaction if you need this classification.
+// Identify delegated outputs. Needs the script, which the UTXO endpoint does
+// not return; see "Cold staking needs scripts" below.
 const info = Wallet.inspectColdStakeScript(scriptHex);
 // { isColdStake, isLof, stakingAddress, ownerAddress }
 
@@ -220,7 +220,88 @@ const encrypted = wallet.toSerializedEncrypted(passphraseDerivedKey32Bytes);
 localStorage.setItem('wallet', encrypted);
 ```
 
-**See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
+**See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo**: one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
+
+### Cold staking needs scripts
+
+A delegation is recognisable *only* from its `scriptPubKey`, and no explorer returns one from its UTXO endpoint: not Blockbook, not its work-alikes such as [rusty-blox](https://github.com/Liquid369/rusty-blox). Nothing else about a delegated output distinguishes it from an ordinary one, and the sighash commits to the exact script, so it cannot be inferred either.
+
+Skip this and there is no error, just wrong answers: `delegatedBalanceSat()` reads 0, delegated outputs are counted as spendable and can be picked for an ordinary send that the network then rejects, and `withdrawColdStake` has nothing to sign against. Wallets that never delegate are unaffected.
+
+The script comes from a second call. `/api/v2/tx/{txid}` returns `vout[n].hex`, the scriptPubKey of outpoint `(txid, n)`. Join it on before parsing:
+
+```js
+const utxos = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json());
+
+// One fetch per distinct funding tx, not per UTXO, and bound the concurrency.
+// A delegation that has been staking a while has one output per stake, so this
+// list reaches the hundreds; see `mapWithLimit` in examples/web-wallet.
+const txids = [...new Set(utxos.map(u => u.txid))];
+const txs = await mapWithLimit(txids, 6, id =>
+  fetch(`/api/v2/tx/${id}`).then(r => r.json()));
+
+const scripts = new Map();
+for (const tx of txs) for (const o of tx.vout) scripts.set(`${tx.txid}:${o.n}`, o.hex);
+
+wallet.setUtxos(parseBlockbookUtxos(
+  utxos.map(u => ({ ...u, script: scripts.get(`${u.txid}:${u.vout}`) ?? '' })),
+));
+
+wallet.delegatedBalanceSat(); // now non-zero if anything is delegated
+```
+
+`parseBlockbookUtxos` reads the script from `script`, `scriptPubKey` (flat or Core's nested verbose-RPC object) or `hex`, so copy it across under whichever name is handiest. Anything that is not valid even-length hex is treated as absent.
+
+`/api/v2/address/{addr}?details=txs` is the bulk alternative: it returns the same `vout[].hex` for every transaction touching the address, in one paged call.
+
+#### Staked delegations are coinstake outputs
+
+Staking a delegation **consumes and recreates it**. The script is preserved byte-for-byte (consensus requires it, so the delegation keeps working and `is_p2cs` keeps matching), but the outpoint changes on every stake and the replacement lives in a *coinstake* transaction. Two consequences:
+
+- **The outpoint churns.** Refresh the UTXO set immediately before building a withdrawal and treat a missing-inputs rejection as "re-fetch and rebuild". A set cached for an hour may already be stale.
+- **The new output is immature.** PIVX applies `COINBASE_MATURITY` to coinstake outputs, so it cannot be spent until it is 100 blocks deep. Explorers list it as an ordinary UTXO well before then: on mainnet a live delegation showed up in `/api/v2/utxo` with 19 confirmations, indistinguishable in that response from a spendable one.
+
+The kit enforces this, but it can only do so with information you supply: it performs no I/O, so it cannot see confirmations or transaction types for itself. Set `coinstake` and `confirmations` on each UTXO and every builder respects them. Both default to "ordinary, spendable", so this changes nothing for consumers that don't populate them.
+
+Detect a coinstake from the same tx responses the script join already fetched:
+
+```js
+// PIVX marks a coinstake with an empty zero-value first output, and unlike a
+// coinbase it always spends a real input.
+const isCoinstakeTx = tx =>
+  tx.vout.length >= 2 && tx.vout[0].value === '0' && !!tx.vin?.[0]?.txid;
+
+// `txs` is from the join above, so this costs no extra requests.
+const coinstakeTxids = new Set(txs.filter(isCoinstakeTx).map(tx => tx.txid));
+
+wallet.setUtxos(parseBlockbookUtxos(utxos.map(u => ({
+  ...u,
+  script: scripts.get(`${u.txid}:${u.vout}`) ?? '',
+  coinstake: coinstakeTxids.has(u.txid),
+  confirmations: u.confirmations,   // explorers return this already
+}))));
+
+wallet.transparentBalanceSat();  // spendable now
+wallet.immatureBalanceSat();     // exists, but not yet spendable
+wallet.delegatedBalanceSat();    // delegated, mature or not
+```
+
+With that in place a builder will not select an immature output, and naming one explicitly is an error that says how long the wait is:
+
+```
+UTXO abc…:1 was created by a coinstake 19 block(s) ago and needs 101.
+It was staked recently, so it becomes withdrawable in 82 block(s)
+```
+
+Balance semantics are worth stating precisely, because the three overlap:
+
+| accessor | includes |
+|---|---|
+| `transparentBalanceSat` | ordinary outputs, mature only: what a plain send can spend right now |
+| `delegatedBalanceSat` | every P2CS output, mature or not: what is committed to staking |
+| `immatureBalanceSat` | every coinstake/coinbase output below maturity, delegated or not |
+
+A freshly staked delegation appears in both `delegatedBalanceSat` and `immatureBalanceSat`, and in neither `transparentBalanceSat`. That is deliberate: one answers "what do I hold", the other "what is still landing".
 
 ## Status
 
@@ -259,12 +340,13 @@ differ:
    figure is the larger, true one. Consumers displaying a fee to users will show a
    slightly higher number in that case, which is the number the user actually pays.
 
-Detecting delegated outputs needs each UTXO's `script`, and Blockbook's UTXO endpoint
-omits it — `parseBlockbookUtxos` leaves the field empty. A delegated output whose script
-is unknown is treated as ordinary, so it counts as spendable and an ordinary send may
-select it, which the network then rejects. **Consumers using cold staking must populate
-`script`** (fetch the funding transaction, which does expose it). Wallets that never
-delegate are unaffected.
+Detecting delegated outputs needs each UTXO's `script`, and no explorer returns one from
+its UTXO endpoint. A delegated output whose script is unknown is treated as ordinary, so
+it counts as spendable and an ordinary send may select it, which the network then
+rejects. **Consumers using cold staking must join the script on themselves**, from
+`/api/v2/tx/{txid}` as `vout[n].hex`; `parseBlockbookUtxos` carries it through when it is
+present. See [Cold staking needs scripts](#cold-staking-needs-scripts). Wallets that
+never delegate are unaffected.
 
 **v0.3.0** — multi-recipient sends (`sendTransparentToMany`, `sendShieldToMany`,
 `sendTransparentFromUtxosToMany`, plus matching fee estimators), and four fixes to
