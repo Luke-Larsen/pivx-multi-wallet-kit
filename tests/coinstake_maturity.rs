@@ -100,6 +100,96 @@ fn maturity_boundary_is_one_past_the_constant() {
     }
 }
 
+/// PIVX Core, transcribed. Two separate rules govern this, and conflating them
+/// is the mistake that costs either a rejected broadcast or stranded funds.
+mod core_rules {
+    /// `consensus.nCoinbaseMaturity`, mainnet (`chainparams.cpp`, `CMainParams`).
+    /// Testnet is 15 and regtest 100, which is why this is worth pinning.
+    pub const N_COINBASE_MATURITY: i64 = 100;
+
+    /// The **consensus** rule (`validation.cpp`, `CheckInputs`). Applies to
+    /// `IsCoinBase() || IsCoinStake()` alike:
+    ///
+    /// ```cpp
+    /// if ((signed long)nSpendHeight - coin.nHeight < (signed long)consensus.nCoinbaseMaturity)
+    ///     return state.Invalid(..., "bad-txns-premature-spend-of-coinbase-coinstake");
+    /// ```
+    ///
+    /// A transaction mined at `spend_height` spending an output created at
+    /// `coin_height` is valid when the difference reaches the constant.
+    pub fn consensus_accepts(spend_height: i64, coin_height: i64) -> bool {
+        spend_height - coin_height >= N_COINBASE_MATURITY
+    }
+
+    /// The **wallet** rule (`wallet.cpp`), deliberately one block stricter:
+    ///
+    /// ```cpp
+    /// int CWalletTx::GetBlocksToMaturity() const {
+    ///     if (!(IsCoinBase() || IsCoinStake())) return 0;
+    ///     return std::max(0, (Params().GetConsensus().nCoinbaseMaturity + 1) - GetDepthInMainChain());
+    /// }
+    /// bool CWalletTx::IsInMainChainImmature() const {
+    ///     ...
+    ///     return (depth > 0 && depth <= Params().GetConsensus().nCoinbaseMaturity);
+    /// }
+    /// ```
+    pub fn blocks_to_maturity(depth: i64) -> i64 {
+        std::cmp::max(0, (N_COINBASE_MATURITY + 1) - depth)
+    }
+
+    pub fn wallet_says_immature(depth: i64) -> bool {
+        depth > 0 && depth <= N_COINBASE_MATURITY
+    }
+}
+
+/// Cross-check this crate against Core's own arithmetic across the whole
+/// interesting range, rather than at a few hand-picked points.
+///
+/// A wallet must follow the *wallet* rule, not the consensus one. The two differ
+/// at exactly one depth (100), where consensus would accept a spend but Core's
+/// wallet still refuses to build it. Matching the stricter rule means this crate
+/// can never emit a transaction rejected as a premature spend.
+#[test]
+fn matches_pivx_core_maturity_arithmetic() {
+    assert_eq!(COINBASE_MATURITY as i64, core_rules::N_COINBASE_MATURITY);
+
+    for depth in 1..=250u32 {
+        let u = coinstake_utxo("a", 1_000_000, depth);
+        let d = depth as i64;
+
+        assert_eq!(
+            u.is_mature(),
+            !core_rules::wallet_says_immature(d),
+            "depth {depth}: disagrees with Core's IsInMainChainImmature"
+        );
+        assert_eq!(
+            u.blocks_until_mature() as i64,
+            core_rules::blocks_to_maturity(d),
+            "depth {depth}: disagrees with Core's GetBlocksToMaturity"
+        );
+
+        // Never looser than consensus. A transaction built now would land at
+        // `spend_height = tip + 1`, and for an output `depth` deep that makes
+        // `spend_height - coin_height == depth`.
+        if u.is_mature() {
+            assert!(
+                core_rules::consensus_accepts(d, 0),
+                "depth {depth}: would build a spend that consensus rejects"
+            );
+        }
+    }
+}
+
+/// The single depth where the two rules disagree, called out on its own so the
+/// deliberate one-block conservatism cannot be "fixed" by accident.
+#[test]
+fn is_one_block_stricter_than_consensus_at_the_boundary() {
+    let at_100 = coinstake_utxo("a", 1_000_000, 100);
+    assert!(core_rules::consensus_accepts(100, 0), "consensus would accept a spend at depth 100");
+    assert!(!at_100.is_mature(), "but Core's wallet waits, and so do we");
+    assert_eq!(at_100.blocks_until_mature(), 1);
+}
+
 /// Nothing but coinstake and coinbase outputs is ever held back, and the flag
 /// defaults to off, so existing consumers are untouched.
 #[test]

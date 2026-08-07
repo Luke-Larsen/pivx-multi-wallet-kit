@@ -30,12 +30,29 @@ pub const SIGHASH_ALL: u32 = 1;
 
 /// Confirmations a coinbase or coinstake output needs before it may be spent.
 ///
-/// PIVX Core's `CWalletTx::GetBlocksToMaturity` returns
-/// `(COINBASE_MATURITY + 1) - GetDepthInMainChain()` and applies it to coinstake
-/// outputs as well as coinbase ones, so an output is mature once its depth
-/// *exceeds* this value. (The 600 that appears in staking discussions is
-/// `nStakeMinDepth`, the depth an input needs before it may be used to stake.
-/// It is not a spend-maturity rule and does not belong here.)
+/// `consensus.nCoinbaseMaturity` for mainnet, from PIVX Core's `chainparams.cpp`
+/// (`CMainParams`). Testnet uses 15 and regtest 100, so this is a mainnet-only
+/// constant like the rest of this module.
+///
+/// Two Core rules govern spending, and this crate follows the stricter one:
+///
+/// * **Consensus** (`validation.cpp`, `CheckInputs`) rejects a spend when
+///   `nSpendHeight - coin.nHeight < nCoinbaseMaturity`, for
+///   `IsCoinBase() || IsCoinStake()` alike.
+/// * **Core's wallet** (`wallet.cpp`) waits one block longer:
+///   `GetBlocksToMaturity` is `max(0, (nCoinbaseMaturity + 1) - depth)`, and
+///   `IsInMainChainImmature` is `depth <= nCoinbaseMaturity`.
+///
+/// [`crate::wallet::SerializedUTXO::is_mature`] matches the wallet rule, so an
+/// output is mature once its depth *exceeds* this value. The two differ at
+/// exactly one depth (100), where consensus would accept a spend that Core's
+/// wallet still declines to build. Being the stricter of the two is what
+/// guarantees this crate never emits a premature spend. Both rules are
+/// transcribed and cross-checked in `tests/coinstake_maturity.rs`.
+///
+/// The 600 that appears in staking discussions is `nStakeMinDepth`, the depth an
+/// input needs before it may be used *to stake*. It is not a spend-maturity rule
+/// and does not belong here.
 ///
 /// This matters for cold staking specifically: staking a delegation consumes it
 /// and recreates it inside a coinstake transaction, so a live delegation spends
