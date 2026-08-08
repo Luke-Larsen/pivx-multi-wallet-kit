@@ -487,7 +487,7 @@ pub fn estimate_delegation_fee(
 ///
 /// The replacement is also *immature*. It lives in a coinstake transaction, and
 /// PIVX applies [`crate::params::COINBASE_MATURITY`] to those, so it cannot be
-/// spent until it is 100 blocks deep. Explorers list it long before that, in the
+/// spent until it is 101 confirmations deep. Explorers list it long before that, in the
 /// same shape as any other UTXO, so a freshly staked delegation looks perfectly
 /// spendable and is not.
 ///

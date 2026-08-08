@@ -302,28 +302,40 @@ impl Wallet {
         self.inner.get_balance()
     }
 
+    /// Value in coinstake/coinbase outputs that exist but have not matured, so
+    /// no builder will spend them yet. Rises into `transparentBalanceSat` (or
+    /// stays delegated) as blocks arrive. Always 0 unless UTXOs carry
+    /// `coinstake` and `confirmations`, which `parseBlockbookUtxos` reads from
+    /// the explorer response when they are present.
+    #[wasm_bindgen(js_name = immatureBalanceSat)]
+    pub fn immature_balance_sat(&self) -> u64 {
+        self.inner.get_immature_balance()
+    }
+
     /// Balance held in cold-staking delegations, redeemable via
-    /// `withdrawColdStake` rather than an ordinary send.
+    /// `withdrawColdStake` rather than an ordinary send. Counts delegations
+    /// whether or not they have matured.
     ///
     /// Only counts UTXOs whose `script` is populated and parses as P2CS.
     /// Blockbook's UTXO endpoint omits scripts, and `parseBlockbookUtxos` leaves
     /// the field empty, so a consumer using cold staking must populate `script`
     /// for delegated outputs, or they will be counted as spendable and selected
     /// by ordinary sends, which the network then rejects.
-    /// Value in coinstake/coinbase outputs that exist but have not matured, so
-    /// no builder will spend them yet. Rises into `transparentBalanceSat` (or
-    /// stays delegated) as blocks arrive. Always 0 unless UTXOs carry
-    /// `coinstake` and `confirmations`.
-    #[wasm_bindgen(js_name = immatureBalanceSat)]
-    pub fn immature_balance_sat(&self) -> u64 {
-        self.inner.get_immature_balance()
-    }
-
     #[wasm_bindgen(js_name = delegatedBalanceSat)]
     pub fn delegated_balance_sat(&self) -> u64 {
         self.inner.get_delegated_balance()
     }
 
+    /// Value an ordinary send can spend right now: excludes delegated outputs
+    /// and anything still maturing.
+    ///
+    /// The balance to display next to a send field. Summing your own UTXO list
+    /// instead will overshoot by whatever is delegated or immature, and the
+    /// builder will then refuse the amount your own UI offered.
+    ///
+    /// For the amount a "send max" control should offer, use `maxSendableSat`
+    /// rather than subtracting a fee estimate from this: the fee depends on how
+    /// many inputs selection reaches for, so the two are mutually dependent.
     #[wasm_bindgen(js_name = transparentBalanceSat)]
     pub fn transparent_balance_sat(&self) -> u64 {
         self.inner.get_transparent_balance()
@@ -332,6 +344,48 @@ impl Wallet {
     #[wasm_bindgen(js_name = totalBalanceSat)]
     pub fn total_balance_sat(&self) -> u64 {
         self.inner.get_balance() + self.inner.get_transparent_balance()
+    }
+
+    /// Largest amount a transparent send to `toAddress` can pay right now,
+    /// after fee. This is the number to put behind a "send max" control.
+    ///
+    /// Routes on the destination prefix, like `sendTransparentToTransparent`
+    /// and `estimateSendTransparentFee`: a `ps1…` address is priced as a
+    /// shielding transaction, anything else as an ordinary transparent one.
+    ///
+    /// Computed from the same filtered UTXO set and the same fee model the
+    /// builder uses, so the figure is always buildable and leaves no change.
+    /// Do not derive it by summing `utxos()` instead: that counts delegated and
+    /// immature outputs no builder will select, so the amount your UI offers
+    /// gets refused by the send that follows.
+    ///
+    /// ```js
+    /// const max = wallet.maxSendableSat(destination);
+    /// if (max === 0n) { /* nothing sendable: disable the control */ }
+    /// else { amountField.value = formatSatToPiv(max); }
+    /// ```
+    ///
+    /// Returns 0 when nothing can be sent: no spendable UTXOs, a fee that
+    /// swallows the balance, or a remainder that would be dust and therefore
+    /// unrelayable.
+    #[wasm_bindgen(js_name = maxSendableSat)]
+    pub fn max_sendable_sat(&self, to_address: &str) -> u64 {
+        use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
+        if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+            crate::transparent::builder::max_shieldable_transparent(&self.inner)
+        } else {
+            crate::transparent::builder::max_sendable_transparent(&self.inner, 1)
+        }
+    }
+
+    /// Multi-recipient form of `maxSendableSat`: the largest *total* a send to
+    /// `recipientCount` transparent recipients can pay, after fee.
+    ///
+    /// Split it across recipients however you like, as long as the parts sum to
+    /// this and each part clears the 5460 sat dust threshold.
+    #[wasm_bindgen(js_name = maxSendableSatToMany)]
+    pub fn max_sendable_sat_to_many(&self, recipient_count: usize) -> u64 {
+        crate::transparent::builder::max_sendable_transparent(&self.inner, recipient_count)
     }
 
     #[wasm_bindgen(js_name = lastBlock)]
@@ -909,8 +963,18 @@ impl Wallet {
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         let dest_is_shield =
             to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
-        let mut utxos: Vec<u64> =
-            self.inner.unspent_utxos.iter().map(|u| u.amount).collect();
+        // Same filter the builders select on (see
+        // `transparent::builder::select_transparent_utxos`). Estimating over
+        // the unfiltered set quotes a fee for coins no builder will reach for,
+        // so a caller sizing a "send max" against it gets an amount the
+        // subsequent send then refuses.
+        let mut utxos: Vec<u64> = self
+            .inner
+            .unspent_utxos
+            .iter()
+            .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
+            .map(|u| u.amount)
+            .collect();
         utxos.sort_unstable_by(|a, b| b.cmp(a));
         let mut total = 0u64;
         for (i, v) in utxos.iter().enumerate() {
@@ -1120,6 +1184,14 @@ pub fn parse_shield_stream(
 /// which is what a staked delegation becomes. Carry that across as `coinstake`
 /// (with the explorer's `confirmations`) and no builder will spend one before it
 /// matures. Both fields default to "ordinary, spendable" when omitted.
+///
+/// **`coinstake`, `coinbase` and `confirmations` are read straight off each
+/// entry**, so an explorer that already returns them (rusty-blox does; Blockbook
+/// proper does not) enables maturity enforcement with no code change on the
+/// caller's side. Unlike `script`, this one is not opt-in. It affects ordinary
+/// sends, not just cold staking, so read `transparentBalanceSat()` for a
+/// spendable total and `maxSendableSat()` for a send-max amount, rather than
+/// summing the returned array.
 ///
 /// ```js
 /// const utxos = await (await fetch(`${EXPLORER}/api/v2/utxo/${addr}`)).json();

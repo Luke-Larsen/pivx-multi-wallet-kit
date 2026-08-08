@@ -56,7 +56,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (199 total: 16 unit + 183 integration, many against real
+# Tests (211 total: 16 unit + 195 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -259,11 +259,22 @@ wallet.delegatedBalanceSat(); // now non-zero if anything is delegated
 Staking a delegation **consumes and recreates it**. The script is preserved byte-for-byte (consensus requires it, so the delegation keeps working and `is_p2cs` keeps matching), but the outpoint changes on every stake and the replacement lives in a *coinstake* transaction. Two consequences:
 
 - **The outpoint churns.** Refresh the UTXO set immediately before building a withdrawal and treat a missing-inputs rejection as "re-fetch and rebuild". A set cached for an hour may already be stale.
-- **The new output is immature.** PIVX applies `COINBASE_MATURITY` to coinstake outputs, so it cannot be spent until it is 100 blocks deep. Explorers list it as an ordinary UTXO well before then: on mainnet a live delegation showed up in `/api/v2/utxo` with 19 confirmations, indistinguishable in that response from a spendable one.
+- **The new output is immature.** PIVX applies `COINBASE_MATURITY` to coinstake outputs, so it takes 101 confirmations to become spendable. Explorers list it as an ordinary UTXO well before then: on mainnet a live delegation showed up in `/api/v2/utxo` with 19 confirmations, indistinguishable in that response from a spendable one.
 
-The kit enforces this, but it can only do so with information you supply: it performs no I/O, so it cannot see confirmations or transaction types for itself. Set `coinstake` and `confirmations` on each UTXO and every builder respects them. Both default to "ordinary, spendable", so this changes nothing for consumers that don't populate them.
+The kit enforces this, but it can only do so with information you supply: it performs no I/O, so it cannot see confirmations or transaction types for itself. Set `coinstake` and `confirmations` on each UTXO and every builder respects them. Both default to "ordinary, spendable", so a consumer that leaves them unset sees exactly the pre-0.4.0 behaviour.
 
-Detect a coinstake from the same tx responses the script join already fetched:
+> **You may already be populating them without meaning to.** `parseBlockbookUtxos` reads `coinstake` and `confirmations` straight off each entry, so any explorer whose UTXO endpoint returns those keys switches maturity enforcement on with no code change on your side. Blockbook proper returns neither. [rusty-blox](https://github.com/Liquid369/rusty-blox) returns both, and a live `/utxo` entry looks like this:
+>
+> ```json
+> {"txid":"7ee7ab26…","vout":1,"value":"81127555556","confirmations":364,
+>  "height":5531321,"coinbase":false,"coinstake":true,"spendable":true}
+> ```
+>
+> That is the correct outcome, not a surprise to work around: those coins genuinely cannot be spent yet. But it lands on the *ordinary send* path, not just the cold-staking one, so check the "send max" note below before shipping.
+>
+> `coinbase` is read as well, and folds into the same flag: PIVX matures coinbase and coinstake outputs by the identical rule, so mining and masternode rewards are held back too. A `spendable` field is ignored, because the kit reaches its own verdict from the other two.
+
+Detect a coinstake from the same tx responses the script join already fetched. Do this when your explorer does not report `coinstake` itself:
 
 ```js
 // PIVX marks a coinstake with an empty zero-value first output, and unlike a
@@ -293,6 +304,10 @@ UTXO abc…:1 was created by a coinstake 19 block(s) ago and needs 101.
 It was staked recently, so it becomes withdrawable in 82 block(s)
 ```
 
+101 confirmations, not 100, throughout: `COINBASE_MATURITY` is 100, and the kit follows Core's *wallet* rule (`depth > nCoinbaseMaturity`) rather than the looser consensus one, so an output is spendable once its depth **exceeds** the constant. Both rules are transcribed in `params.rs` and checked against Core's arithmetic in `tests/coinstake_maturity.rs`.
+
+> **Testing on testnet:** `COINBASE_MATURITY` is a mainnet constant, like everything else in `params`. Testnet's own `nCoinbaseMaturity` is 15, so between 16 and 101 confirmations the kit will hold back outputs that testnet itself would let you spend. That is over-strict rather than unsafe, and it is the right behaviour for the mainnet target, but do not read it as a bug when a testnet reward stays immature far longer than the chain says it should. It does make the "send max" interaction easy to reproduce there, since nearly every recent staking reward will read as immature.
+
 Balance semantics are worth stating precisely, because the three overlap:
 
 | accessor | includes |
@@ -302,6 +317,40 @@ Balance semantics are worth stating precisely, because the three overlap:
 | `immatureBalanceSat` | every coinstake/coinbase output below maturity, delegated or not |
 
 A freshly staked delegation appears in both `delegatedBalanceSat` and `immatureBalanceSat`, and in neither `transparentBalanceSat`. That is deliberate: one answers "what do I hold", the other "what is still landing".
+
+#### Drive "send max" from `transparentBalanceSat`, not your own sum
+
+`transparentBalanceSat` is filtered by exactly the rule the builders select on, so it is the ceiling a send can reach. Deriving that ceiling any other way puts your UI and the kit into disagreement, and the disagreement runs the wrong way:
+
+```js
+// Wrong: counts delegated and immature outputs no builder will select.
+const max = utxos.reduce((a, u) => a + Number(u.value), 0) - fee;
+```
+
+That overshoots by whatever is delegated or still maturing, so the UI offers an amount and the kit then refuses it with `No spendable transparent UTXOs: … sat is in coinstake outputs that have not reached maturity yet`. A wallet with no delegations and no staking history sees the two agree, which is why this survives testing and then fires on the first staker who presses **Max**. Any balance shown next to a send field should come from the same accessor, for the same reason.
+
+Do not subtract a fee from `transparentBalanceSat` yourself either. The fee depends on how many inputs selection reaches for, so the amount and the fee are mutually dependent, and solving that by hand is a reliable source of off-by-one errors. Ask for the figure instead:
+
+```js
+const max = wallet.maxSendableSat(destination);
+if (max === 0n) {
+  // Nothing sendable: no spendable UTXOs, or what survives the fee is dust.
+  // Disable the control rather than offering an amount that will be refused.
+} else {
+  amountField.value = formatSatToPiv(max);
+}
+```
+
+`maxSendableSat` runs the same UTXO filter and the same fee model the builder will, so the figure it returns is always buildable and leaves exactly zero change. It routes on the destination prefix, pricing a `ps1…` address as a shielding transaction. `maxSendableSatToMany(recipientCount)` is the multi-recipient form: split its result however you like, as long as the parts sum to it and each clears the 5460 sat dust threshold.
+
+| you want | call |
+|---|---|
+| the balance to display | `transparentBalanceSat()` |
+| the most a send can pay | `maxSendableSat(destination)` |
+| the fee for a specific amount | `estimateSendTransparentFee(destination, amount)` |
+| the fee actually paid | `result.fee`, after the send |
+
+All four apply the delegated-and-immature filter, so they agree with each other and with the builder. `result.fee` can exceed the estimate when dust change is absorbed into it, and is the number the user really paid.
 
 ## Status
 
@@ -322,12 +371,21 @@ produces an output that is either unspendable or spendable by the wrong party.
 
 **Staked delegations are handled too**, which is the state a delegation spends almost
 all of its life in: staking consumes the delegation and recreates it inside a coinstake
-transaction, immature for 100 blocks. Populate `coinstake` and `confirmations` on each
+transaction, immature until it is 101 confirmations deep. Populate `coinstake` and `confirmations` on each
 UTXO and no builder will select one before it matures, with `immatureBalanceSat` for what
-is being held back. See [Staked delegations are coinstake
+is being held back. Coinbase outputs (mining and masternode rewards) mature by the same
+rule and are covered by the same flag. `parseBlockbookUtxos` fills all of this in by
+itself when the explorer reports it, which rusty-blox does, so the enforcement can arrive
+unrequested: see [Staked delegations are coinstake
 outputs](#staked-delegations-are-coinstake-outputs). The rule is checked against Core's
 own consensus and wallet arithmetic in `tests/coinstake_maturity.rs`; it has not yet been
 observed against a live node, since a mainnet stake can take weeks to arrive.
+
+**`maxSendableSat` answers "how much can I send".** A wallet that works this out by
+summing its own UTXO list will offer amounts the builder then refuses, once its user has
+anything delegated or still maturing. The kit now computes it against the same filter and
+fee model the builder uses. See [Drive "send max" from
+`transparentBalanceSat`](#drive-send-max-from-transparentbalancesat-not-your-own-sum).
 
 **One behaviour changed for everyone, not just cold staking.** PIVX rejects any output
 worth less than it costs to spend: `IsStandardTx` fails with `reason = "dust"`, so no
@@ -339,13 +397,26 @@ transactions nothing would accept. See *Upgrading to 0.4.0*.
 The cold-staking API is entirely new. One existing type changed shape:
 
 0. **`SerializedUTXO` gained `coinstake` and `confirmations`.** Both default to
-   "ordinary, immediately spendable", so behaviour is unchanged unless you populate them.
+   "ordinary, immediately spendable".
    - *Rust consumers*: this is a breaking change if you build the struct with a literal.
      Add `..Default::default()` (the type now derives `Default`) or set the two fields.
-   - *JS/TS consumers*: both are optional in the generated types. Nothing to do.
+   - *JS/TS consumers*: both are optional in the generated types, so nothing is required
+     of you. **But `parseBlockbookUtxos` reads them off the explorer response**, so if
+     your explorer already returns them, maturity enforcement turns itself on and coins
+     you could previously select become unselectable until they are 101 confirmations deep.
+     Blockbook proper returns neither key; rusty-blox returns both, plus `coinbase`,
+     which folds into the same flag. See [Staked delegations are coinstake
+     outputs](#staked-delegations-are-coinstake-outputs) and the "send max" note above
+     it, which is where this surfaces first.
    - *Persisted wallets*: older JSON deserializes unchanged and reads as mature.
 
-Two behaviours differ:
+One addition, which nothing you already call has to change to use:
+**`maxSendableSat(destination)` and `maxSendableSatToMany(count)`** give the largest
+amount a send can pay after fee, computed against the same filter and fee model the
+builder uses. Replace any locally computed "send max" with it: the local version
+over-counts delegated and immature coins.
+
+Three behaviours differ:
 
 1. **Dust outputs are now handled.** The threshold is 5460 sat for an ordinary output
    (6240 for a cold-staking one). Recipients below it are **rejected** rather than
@@ -356,6 +427,11 @@ Two behaviours differ:
    rather than the estimate. When dust change is absorbed the two differ: the reported
    figure is the larger, true one. Consumers displaying a fee to users will show a
    slightly higher number in that case, which is the number the user actually pays.
+
+3. **`estimateSendTransparentFee` now excludes delegated and immature coins**, matching
+   the selection the builder performs. It previously quoted against the raw UTXO set, so
+   it could price inputs no builder would reach for. Wallets with no delegations and no
+   staking history see the same figure as before.
 
 Detecting delegated outputs needs each UTXO's `script`, and no explorer returns one from
 its UTXO endpoint. A delegated output whose script is unknown is treated as ordinary, so

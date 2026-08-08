@@ -43,9 +43,16 @@ pub struct SerializedUTXO {
     pub amount: u64,
     pub script: String,
     pub height: u32,
-    /// Whether this output was created by a coinstake transaction, which makes
-    /// it subject to [`crate::params::COINBASE_MATURITY`]. Defaults to `false`, so a consumer
-    /// that never sets it sees exactly the pre-maturity behaviour.
+    /// Whether this output is subject to [`crate::params::COINBASE_MATURITY`].
+    /// Defaults to `false`, so a consumer that never sets it sees exactly the
+    /// pre-maturity behaviour. Note that [`parse_blockbook_utxos`] sets it from
+    /// the explorer response when the key is present, so "never sets it" is a
+    /// claim about your explorer as much as about your code.
+    ///
+    /// Named for the common case, but it covers **coinbase outputs too**: PIVX
+    /// matures the two identically, and this carries both rather than splitting
+    /// them across two fields that would always be read together. Set it on
+    /// mining and masternode rewards as well as on staking ones.
     ///
     /// A staked cold-staking delegation lands here: staking consumes the
     /// delegation and recreates it inside a coinstake, so this is the *normal*
@@ -147,6 +154,22 @@ fn utxo_script_hex(u: &serde_json::Value) -> String {
 /// `(txid, n)`. Entries are read for `script`, `scriptPubKey` or `hex`, so the
 /// field can be copied across under whichever name is handiest. Anything that
 /// is not valid even-length hex is treated as absent.
+///
+/// # Maturity
+///
+/// `coinstake` and `confirmations` are read from the entry when present.
+/// Unlike `script`, this needs no cooperation from the caller: an explorer that
+/// returns those keys (rusty-blox does, Blockbook proper does not) turns on
+/// maturity enforcement for every builder on its own. The effect reaches
+/// ordinary sends, not only cold staking, so a caller that derives a spendable
+/// total by summing the returned slice will disagree with
+/// [`WalletData::get_transparent_balance`] and with what the builders will
+/// actually select.
+///
+/// A `coinbase` key, where an explorer supplies one, folds into the same flag:
+/// PIVX matures coinbase and coinstake outputs by the identical rule, so mining
+/// and masternode rewards are held back alongside staking ones. A `spendable`
+/// key is ignored; the verdict comes from the other two.
 pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
     let mut utxos: Vec<SerializedUTXO> = Vec::new();
     for u in raw {
@@ -163,7 +186,14 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
         // (Blockbook's UTXO entries carry no such field), so this is normally
         // set by the caller from the same tx responses that supplied `script`.
         // Absent means "not a coinstake", which preserves prior behaviour.
-        let coinstake = u["coinstake"].as_bool().unwrap_or(false);
+        //
+        // `coinbase` folds into the same flag. PIVX matures the two identically
+        // (`IsCoinBase() || IsCoinStake()` in `CheckInputs`), and a wallet
+        // holding mining or masternode rewards would otherwise have them
+        // treated as spendable as soon as they arrive. Folding rather than
+        // adding a field keeps `SerializedUTXO` the shape it already is.
+        let coinstake = u["coinstake"].as_bool().unwrap_or(false)
+            || u["coinbase"].as_bool().unwrap_or(false);
         let confirmations = u["confirmations"].as_u64().unwrap_or(0) as u32;
 
         if txid.is_empty() || amount == 0 {
@@ -344,10 +374,10 @@ impl WalletData {
     ///
     /// This is a *balance*, not a spendable amount. Staking a delegation
     /// replaces it with a coinstake output that PIVX will not let anyone spend
-    /// for 100 blocks, and that immature output is counted here because the
-    /// coins are genuinely held. The withdrawal builder refuses it until it
-    /// matures; see [`WalletData::get_immature_balance`] for how much is in
-    /// that state.
+    /// until it is 101 confirmations deep, and that immature output is counted
+    /// here because the coins are genuinely held. The withdrawal builder refuses
+    /// it until it matures; see [`WalletData::get_immature_balance`] for how
+    /// much is in that state.
     pub fn get_delegated_balance(&self) -> u64 {
         self.unspent_utxos
             .iter()

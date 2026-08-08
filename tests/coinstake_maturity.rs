@@ -4,7 +4,8 @@
 //! coinstake spends the P2CS outpoint and pays an identical script back, so a
 //! delegation that has been earning for any length of time is a coinstake
 //! output, not the original delegation. PIVX applies `COINBASE_MATURITY` to
-//! coinstake outputs, so the replacement cannot be spent for 100 blocks.
+//! coinstake outputs, so the replacement cannot be spent until it is 101
+//! confirmations deep.
 //!
 //! Explorers publish it long before then, in the same shape as any other UTXO:
 //! verified on mainnet, where a live delegation appeared in `/api/v2/utxo` with
@@ -12,8 +13,10 @@
 //! wallet cannot rely on the feed to hide these, and a withdrawal built against
 //! a freshly staked delegation would be rejected by the network.
 //!
-//! Maturity is opt-in by construction: `coinstake` defaults to false, so a
-//! consumer that never populates it sees exactly the pre-maturity behaviour.
+//! `coinstake` defaults to false, so a consumer that never populates it sees
+//! exactly the pre-maturity behaviour. It is not opt-in at the parse boundary
+//! though: `parse_blockbook_utxos` reads the flag from the explorer response
+//! when it is there, and rusty-blox supplies it.
 
 use pivx_wallet_kit::params::COINBASE_MATURITY;
 use pivx_wallet_kit::simd;
@@ -355,6 +358,46 @@ fn parser_reads_maturity_fields_and_defaults_them_off() {
     assert!(parsed[0].coinstake && !parsed[0].is_mature());
     assert_eq!(parsed[0].confirmations, 19);
     assert!(!parsed[1].coinstake && parsed[1].is_mature());
+}
+
+/// PIVX matures coinbase and coinstake outputs by the same rule
+/// (`IsCoinBase() || IsCoinStake()` in `CheckInputs`), so a `coinbase` flag from
+/// the explorer has to hold the output back too. Without this, a wallet
+/// receiving mining or masternode rewards would treat them as spendable as soon
+/// as they arrive, and build transactions the network rejects.
+#[test]
+fn parser_treats_a_coinbase_flag_as_maturity_bearing() {
+    let raw = vec![
+        // rusty-blox reports both keys; only one of them is ever set.
+        serde_json::json!({
+            "txid": "a".repeat(64), "vout": 0, "value": "100", "height": 5_000_000,
+            "coinbase": true, "coinstake": false, "confirmations": 19,
+        }),
+        serde_json::json!({
+            "txid": "b".repeat(64), "vout": 0, "value": "100", "height": 5_000_000,
+            "coinbase": false, "coinstake": true, "confirmations": 19,
+        }),
+        serde_json::json!({
+            "txid": "c".repeat(64), "vout": 0, "value": "100", "height": 5_000_000,
+            "coinbase": false, "coinstake": false, "confirmations": 19,
+        }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert!(!parsed[0].is_mature(), "a 19-confirmation coinbase is not spendable");
+    assert!(!parsed[1].is_mature(), "a 19-confirmation coinstake is not spendable");
+    assert!(parsed[2].is_mature(), "an ordinary output is spendable immediately");
+
+    // Both fold into the one flag, which is why `SerializedUTXO` did not need a
+    // second field for this.
+    assert!(parsed[0].coinstake);
+
+    // And it releases on the same boundary as a coinstake.
+    let mature = wallet::parse_blockbook_utxos(&[serde_json::json!({
+        "txid": "d".repeat(64), "vout": 0, "value": "100", "height": 5_000_000,
+        "coinbase": true, "confirmations": 101,
+    })]);
+    assert!(mature[0].is_mature());
 }
 
 /// Wallets already sitting in someone's `localStorage` were serialized before

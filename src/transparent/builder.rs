@@ -195,35 +195,9 @@ fn select_transparent_utxos(
     let amount = total_recipient_amount(recipients)?;
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
-    // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
-    // here would produce a transaction the network rejects. They remain
-    // redeemable via `create_coldstake_withdrawal`. Immature coinstake outputs
-    // are excluded for a different reason: they exist and are ours, but the
-    // network will not accept a spend of them until they are deep enough.
-    let mut utxos: Vec<SerializedUTXO> = wallet
-        .unspent_utxos
-        .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
-        .cloned()
-        .collect();
-    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    let utxos = spendable_utxos(wallet);
     if utxos.is_empty() {
-        let delegated = wallet.get_delegated_balance();
-        let immature = wallet.get_immature_balance();
-        if delegated > 0 {
-            return Err(format!(
-                "No spendable transparent UTXOs: {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
-            )
-            .into());
-        }
-        if immature > 0 {
-            return Err(format!(
-                "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
-                 have not reached maturity yet"
-            )
-            .into());
-        }
-        return Err("No transparent UTXOs available".into());
+        return Err(no_spendable_utxos_error(wallet));
     }
 
     // Output count for the fee model: recipients plus a possible change
@@ -280,6 +254,106 @@ pub fn estimate_raw_transparent_fee_to_many(
     recipients: &[Recipient],
 ) -> Result<u64, Box<dyn Error>> {
     Ok(select_transparent_utxos(wallet, recipients)?.fee)
+}
+
+/// The UTXOs an ordinary transparent send may select from, largest first.
+///
+/// Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one in
+/// an ordinary send produces a transaction the network rejects. They remain
+/// redeemable via [`create_coldstake_withdrawal`]. Immature coinstake outputs
+/// are excluded for a different reason: they exist and are ours, but the
+/// network will not accept a spend of them until they are deep enough.
+///
+/// Every selection path shares this, so a caller sizing an amount against
+/// [`WalletData::get_transparent_balance`] (which applies the same filter)
+/// cannot be offered coins the builder will then refuse.
+pub(crate) fn spendable_utxos(wallet: &WalletData) -> Vec<SerializedUTXO> {
+    let mut utxos: Vec<SerializedUTXO> = wallet
+        .unspent_utxos
+        .iter()
+        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
+        .cloned()
+        .collect();
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    utxos
+}
+
+/// Why there is nothing to spend, for the case where [`spendable_utxos`] comes
+/// back empty but the wallet is not.
+fn no_spendable_utxos_error(wallet: &WalletData) -> Box<dyn Error> {
+    let delegated = wallet.get_delegated_balance();
+    let immature = wallet.get_immature_balance();
+    if delegated > 0 {
+        return format!(
+            "No spendable transparent UTXOs: {delegated} sat is delegated for cold \
+             staking and must be withdrawn before it can be spent"
+        )
+        .into();
+    }
+    if immature > 0 {
+        return format!(
+            "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
+             have not reached maturity yet"
+        )
+        .into();
+    }
+    "No transparent UTXOs available".into()
+}
+
+/// Largest amount a transparent send to `recipient_count` recipients can pay
+/// right now, after the fee that send will charge.
+///
+/// This is the number a "send max" control should offer. It is computed from
+/// the same filtered UTXO set and the same fee model the builder uses, so the
+/// figure is always buildable: passing it straight to
+/// [`create_raw_transparent_transaction_to_many`] leaves exactly zero change.
+///
+/// Returns 0 when nothing can be sent, which includes the case where the fee
+/// swallows the balance and the case where what is left would be dust (an
+/// output below [`fees::dust_threshold`] is non-standard, so the send would be
+/// refused). A UI can treat 0 as "disable the control".
+///
+/// Conservative, never optimistic, in one edge case: when the wallet holds
+/// outputs worth less than they cost to spend, selection stops before reaching
+/// them and the true maximum is marginally higher than this. The difference is
+/// smaller than the fee of one input.
+pub fn max_sendable_transparent(wallet: &WalletData, recipient_count: usize) -> u64 {
+    let utxos = spendable_utxos(wallet);
+    if utxos.is_empty() || recipient_count == 0 {
+        return 0;
+    }
+    let Some(total) = utxos.iter().try_fold(0u64, |a, u| a.checked_add(u.amount)) else {
+        return 0;
+    };
+    // Recipients plus a possible change output, matching `select_transparent_utxos`.
+    // A max send emits no change, so this over-estimates by one output's worth,
+    // which is the direction that keeps the figure buildable.
+    let fee = fees::estimate_raw_transparent_fee(utxos.len(), recipient_count + 1);
+    let max = total.saturating_sub(fee);
+    // 25 bytes: the P2PKH script every ordinary recipient is paid with.
+    if max < fees::dust_threshold(25) {
+        return 0;
+    }
+    max
+}
+
+/// Largest amount [`create_shielding_transaction`] can move into a shield
+/// address right now, after fee.
+///
+/// The shield counterpart to [`max_sendable_transparent`], differing only in
+/// the fee model: a shielding transaction pays for Sapling outputs rather than
+/// transparent ones.
+pub fn max_shieldable_transparent(wallet: &WalletData) -> u64 {
+    let utxos = spendable_utxos(wallet);
+    if utxos.is_empty() {
+        return 0;
+    }
+    let Some(total) = utxos.iter().try_fold(0u64, |a, u| a.checked_add(u.amount)) else {
+        return 0;
+    };
+    // Matches `create_shielding_transaction`: 0 transparent outputs, 2 sapling.
+    let fee = fees::estimate_fee(utxos.len() as u64, 0, 0, 2);
+    total.saturating_sub(fee)
 }
 
 /// Reject a UTXO set containing the same outpoint more than once.
@@ -360,35 +434,9 @@ pub fn create_shielding_transaction(
     };
 
     reject_duplicate_outpoints(&wallet.unspent_utxos)?;
-    // Delegated outputs are excluded: they are P2CS, not P2PKH, so signing one
-    // here would produce a transaction the network rejects. They remain
-    // redeemable via `create_coldstake_withdrawal`. Immature coinstake outputs
-    // are excluded for a different reason: they exist and are ours, but the
-    // network will not accept a spend of them until they are deep enough.
-    let mut utxos: Vec<SerializedUTXO> = wallet
-        .unspent_utxos
-        .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
-        .cloned()
-        .collect();
-    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    let utxos = spendable_utxos(wallet);
     if utxos.is_empty() {
-        let delegated = wallet.get_delegated_balance();
-        let immature = wallet.get_immature_balance();
-        if delegated > 0 {
-            return Err(format!(
-                "No spendable transparent UTXOs: {delegated} sat is delegated for cold                  staking and must be withdrawn before it can be spent"
-            )
-            .into());
-        }
-        if immature > 0 {
-            return Err(format!(
-                "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
-                 have not reached maturity yet"
-            )
-            .into());
-        }
-        return Err("No transparent UTXOs available".into());
+        return Err(no_spendable_utxos_error(wallet));
     }
 
     // Shield dest: 0 transparent outs, 2 sapling outs (destination + change-back-to-self would
