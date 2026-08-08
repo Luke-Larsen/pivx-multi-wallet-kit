@@ -56,7 +56,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (211 total: 16 unit + 195 integration, many against real
+# Tests (222 total: 16 unit + 206 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -164,7 +164,10 @@ const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json());
 wallet.setUtxos(parseBlockbookUtxos(raw));
 const transparentSat = wallet.transparentBalanceSat();
 
-// Sync shield blocks from a PIVX Core compact-stream RPC.
+// Sync shield blocks from a PIVX Core `getshielddata` RPC. Fetch the whole
+// range in one request: parsing a partial stream is fine, but splitting the
+// *fetch* cuts blocks in half. There is no `format` parameter worth passing,
+// the node serves one framing regardless.
 const bytes = new Uint8Array(await (await fetch(streamURL)).arrayBuffer());
 const blocks = parseShieldStream(bytes);
 wallet.applyBlocks(blocks);

@@ -1026,6 +1026,12 @@ fn is_empty_tree_hex_accepts_all_known_empty_forms() {
     assert!(!sapling::tree::is_empty_tree_hex(populated));
 }
 
+/// Header framing, which PIVX Core's `getshielddata` does *not* serve: it sends
+/// footer-framed, 9-byte markers on both its default and `format=compact`
+/// responses. Kept because the parser still supports both, but the framing the
+/// node actually serves is covered in `tests/shield_stream_framing.rs`, against
+/// a recorded mainnet response. Testing only this shape is how a one-block
+/// attribution shift shipped unnoticed.
 #[test]
 fn parse_shield_stream_synthetic_compact() {
     // Hand-craft a minimal valid stream: [block header(0x5d + height)][tx(0x04 + 0 spends + 0 outputs)].

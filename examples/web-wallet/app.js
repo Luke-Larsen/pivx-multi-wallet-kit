@@ -222,13 +222,18 @@ async function main() {
     $('shield-result').innerHTML = '<span class="muted">Syncing from checkpoint…</span>';
 
     try {
-      // Fetch the entire compact stream in a single request. Re-fetching in
-      // batches would truncate the last block of each batch (its header is
-      // counted but subsequent tx packets aren't read before the cap-exit),
-      // silently losing cmus and corrupting every subsequent witness position.
+      // Fetch the entire stream in a single request. Re-fetching in batches
+      // would truncate the last block of each batch (its marker is counted but
+      // subsequent tx packets aren't read before the cap-exit), silently losing
+      // cmus and corrupting every subsequent witness position.
+      //
+      // No `format` parameter: the node ignores it and serves footer-framed
+      // full-raw transactions either way (verified byte-identical responses
+      // with and without `format=compact`). Passing it suggested a choice that
+      // does not exist.
       const startBlock = wallet.lastBlock() + 1;
       const resp = await fetch(
-        `${RPC}/getshielddata?startBlock=${startBlock}&format=compact`
+        `${RPC}/getshielddata?startBlock=${startBlock}`
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const bytes = new Uint8Array(await resp.arrayBuffer());
