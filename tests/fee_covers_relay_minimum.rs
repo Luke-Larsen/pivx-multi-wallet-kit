@@ -228,7 +228,7 @@ fn fee_holds_across_signature_length_variation() {
         let hash = owner_hash_from_seed(&seed(), 0, index).unwrap();
         let script = build_p2cs_script(&STAKER, &hash, ColdStakeVariant::Lof);
         let utxos = vec![SerializedUTXO {
-            txid: "h".repeat(64),
+            txid: "ab".repeat(32),
             vout: 0,
             amount: 500 * COIN,
             script: simd::hex::bytes_to_hex_string(&script),
@@ -258,7 +258,7 @@ fn fee_holds_across_signature_length_variation() {
 #[test]
 fn delegated_change_costs_the_p2cs_surcharge_more() {
     let staking = staking_addr();
-    let utxos = vec![delegated("g", 0, 500 * COIN)];
+    let utxos = vec![delegated("e", 0, 500 * COIN)];
 
     let plain = create_coldstake_withdrawal(&seed(), 0, 0, &utxos, &to_address(), 200 * COIN)
         .unwrap();

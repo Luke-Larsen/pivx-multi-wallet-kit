@@ -32,7 +32,7 @@ use crate::keys;
 use crate::params::{PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
 use crate::transparent::builder::{
     SigningInput, SpentOutpoint, TransparentTransactionResult, TxOutput,
-    reject_duplicate_outpoints, sign_and_serialize,
+    validate_outpoints, sign_and_serialize,
 };
 use crate::wallet::{SerializedUTXO, WalletData};
 use std::error::Error;
@@ -179,7 +179,7 @@ fn decode_checked(address: &str) -> Result<(u8, [u8; 20]), Box<dyn Error>> {
 }
 
 /// Base58Check-encode `hash160` under `version`.
-fn encode_checked(version: u8, hash: &[u8; 20]) -> String {
+pub(crate) fn encode_checked(version: u8, hash: &[u8; 20]) -> String {
     use sha2::{Digest, Sha256};
 
     let mut payload = Vec::with_capacity(25);
@@ -385,6 +385,23 @@ pub fn owner_hash_from_seed(
 /// wallet's own transparent address (HD `0/0`) so the delegation can be
 /// withdrawn later. Any remainder returns there as a plain P2PKH change output.
 ///
+/// **`0/0` on both sides, and not by omission.** Funding comes from `0/0`, and
+/// the owner hash written into the P2CS script is `0/0`'s. The withdrawal
+/// builders take the owner slot as an argument, so the two halves of cold
+/// staking are deliberately asymmetric: anything this function builds is
+/// withdrawn with `from_change = 0, from_index = 0`, while
+/// [`create_coldstake_withdrawal`] can also redeem delegations owned elsewhere
+/// (created by another wallet, or by a future version of this one).
+///
+/// The asymmetry only becomes reachable once a consumer rotates transparent
+/// addresses, and it does not do what the shape of the call suggests:
+/// delegating to *this wallet's own* rotated staking address (`stakingAddressAt(0,
+/// 5)`) produces a delegation staked by `0/5` and owned by `0/0`. That is a
+/// valid delegation and the coins stay under this wallet's control, but a
+/// caller expecting "self-stake at slot 5" to mean "owner at slot 5" would go
+/// looking for the funds under the wrong key. Pinned in
+/// `tests/transparent_address_rotation.rs`.
+///
 /// The output is a normal transaction output with an unusual script, so this
 /// goes through the same [`sign_and_serialize`] path as every other transparent
 /// send: the signed preimage and the emitted body are produced from one
@@ -568,7 +585,7 @@ pub fn create_coldstake_withdrawal_with_change(
     if amount == 0 {
         return Err("Withdrawal amount is zero".into());
     }
-    reject_duplicate_outpoints(delegated)?;
+    validate_outpoints(delegated)?;
 
     let (own_address, pubkey_bytes, privkey_bytes) =
         keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
@@ -736,23 +753,36 @@ fn select_for_delegation(
         .into());
     }
 
-    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
+    validate_outpoints(&wallet.unspent_utxos)?;
     // A delegation is funded from ordinary outputs. Already-delegated ones are
-    // P2CS and cannot be re-delegated without first being withdrawn, and
-    // immature coinstake outputs cannot be spent at all yet.
-    let mut utxos: Vec<SerializedUTXO> = wallet
-        .unspent_utxos
-        .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
-        .cloned()
-        .collect();
-    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
+    // P2CS and cannot be re-delegated without first being withdrawn, immature
+    // coinstake outputs cannot be spent at all yet, and outputs at another HD
+    // slot cannot be signed by the `0/0` key this builder uses. Shared with the
+    // transparent builders so all three exclusions stay in one place: this
+    // path signs with the same key and has the same reach.
+    let utxos = crate::transparent::builder::spendable_utxos(wallet);
     if utxos.is_empty() {
         let immature = wallet.get_immature_balance();
         if immature > 0 {
             return Err(format!(
                 "No spendable transparent UTXOs available to fund a delegation: {immature} sat \
                  is in coinstake outputs that have not reached maturity yet"
+            )
+            .into());
+        }
+        let rotated = wallet.get_rotated_balance();
+        if rotated > 0 {
+            // Unlike an ordinary send there is no per-slot escape hatch here:
+            // a delegation records its owner in the script, and this builder
+            // writes the 0/0 key into it, so funding it from elsewhere is not
+            // a thing that could be made to work by naming a slot. The only
+            // route is to move the coins first, so say that rather than
+            // leaving the caller looking for an argument that does not exist.
+            return Err(format!(
+                "No spendable transparent UTXOs available to fund a delegation: {rotated} sat \
+                 sits at HD slots other than 0/0. A delegation is always funded from, and \
+                 owned by, the key at 0/0, so move the coins there first with \
+                 sendTransparentFromUtxos before delegating"
             )
             .into());
         }

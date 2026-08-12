@@ -154,6 +154,9 @@ pub fn transparent_key_from_bip39_seed(
     change: u32,
     index: u32,
 ) -> Result<(String, Vec<u8>, Zeroizing<Vec<u8>>), Box<dyn Error>> {
+    check_child_number("change", change)?;
+    check_child_number("index", index)?;
+
     let path: DerivationPath = format!("m/44'/{}'/0'/{}/{}", PIVX_COIN_TYPE, change, index)
         .parse()
         .map_err(|e| format!("Invalid derivation path: {e}"))?;
@@ -168,6 +171,53 @@ pub fn transparent_key_from_bip39_seed(
     let address = pubkey_to_pivx_address(&pubkey_bytes);
 
     Ok((address, pubkey_bytes.to_vec(), privkey_bytes))
+}
+
+/// Largest BIP32 child number that is not hardened.
+///
+/// The child number's high bit *is* the hardened flag, so the non-hardened half
+/// of the space ends here. The last two levels of a BIP44 path are non-hardened
+/// by definition (that is what lets a watch-only xpub derive them), so this is
+/// the ceiling on both `change` and `index`.
+const MAX_NON_HARDENED_CHILD: u32 = 0x7fff_ffff;
+
+/// Reject a child number the high bit of which would silently mean "hardened".
+///
+/// The `bip32` crate rejects these too, but as `invalid child number` from
+/// inside a path parse, which reads as a bug in the kit rather than as a
+/// caller's counter having run off the end. A rotating consumer allocating one
+/// slot per invoice is the only party who can reach it, so it says so.
+fn check_child_number(what: &str, n: u32) -> Result<(), Box<dyn Error>> {
+    if n > MAX_NON_HARDENED_CHILD {
+        return Err(format!(
+            "HD {what} {n} is out of range: BIP32 non-hardened child numbers stop at \
+             {MAX_NON_HARDENED_CHILD}, because the high bit selects hardened derivation. \
+             A consumer rotating addresses should move to the next `change` level rather \
+             than push `index` past this."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Derive the transparent (`D...`) address at `m/44'/119'/0'/change/index`.
+///
+/// The counterpart to
+/// [`crate::transparent::coldstake::owner_hash_from_seed`], which produced the
+/// same key's `S...` form: a consumer could get the staking address for any
+/// slot but only the `0/0` transparent one, which is the wrong way round for
+/// address rotation (one address per invoice, per customer, per anything).
+///
+/// The private key is derived and dropped here, since only the address is
+/// wanted. [`Zeroizing`] wipes it on the way out.
+pub fn transparent_address_at(
+    bip39_seed: &[u8],
+    change: u32,
+    index: u32,
+) -> Result<String, Box<dyn Error>> {
+    let (address, _pubkey, _privkey) =
+        transparent_key_from_bip39_seed(bip39_seed, change, index)?;
+    Ok(address)
 }
 
 /// Get the default transparent address from a mnemonic string.

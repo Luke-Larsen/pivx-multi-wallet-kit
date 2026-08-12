@@ -194,7 +194,7 @@ fn select_transparent_utxos(
 
     let amount = total_recipient_amount(recipients)?;
 
-    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
+    validate_outpoints(&wallet.unspent_utxos)?;
     let utxos = spendable_utxos(wallet);
     if utxos.is_empty() {
         return Err(no_spendable_utxos_error(wallet));
@@ -227,9 +227,23 @@ fn select_transparent_utxos(
         .checked_add(fee)
         .ok_or("Amount plus fee overflows u64")?;
     if total < needed {
+        // Coins parked at another HD slot are the one exclusion a caller is
+        // unlikely to have accounted for: the other two (delegated, immature)
+        // have their own balance accessors that a UI is already showing, while
+        // a rotating consumer's funds simply are not in `total` and nothing
+        // else on this path would say why.
+        let rotated = wallet.get_rotated_balance();
+        let elsewhere = if rotated > 0 {
+            format!(
+                ". A further {rotated} sat sits at HD slots other than 0/0 and is not \
+                 selectable here: spend it with sendTransparentFromUtxos"
+            )
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "Insufficient public balance. Have: {} sat, need: {} sat + {} sat fee",
-            total, amount, fee
+            "Insufficient public balance. Have: {} sat, need: {} sat + {} sat fee{}",
+            total, amount, fee, elsewhere
         )
         .into());
     }
@@ -264,6 +278,14 @@ pub fn estimate_raw_transparent_fee_to_many(
 /// are excluded for a different reason: they exist and are ours, but the
 /// network will not accept a spend of them until they are deep enough.
 ///
+/// Outputs tagged to an HD slot other than `0/0` are excluded for a third
+/// reason: every wallet-state builder signs with the key at `0/0` and pays
+/// change back to it, so an output received at `0/5` would be signed against
+/// the wrong script. That is the same class of failure as the P2CS case, a
+/// transaction the network refuses, and it is invisible without the tag
+/// because a P2PKH UTXO carries no hint of which address received it.
+/// Untagged outputs still qualify: see [`SerializedUTXO::matches_slot`].
+///
 /// Every selection path shares this, so a caller sizing an amount against
 /// [`WalletData::get_transparent_balance`] (which applies the same filter)
 /// cannot be offered coins the builder will then refuse.
@@ -271,7 +293,9 @@ pub(crate) fn spendable_utxos(wallet: &WalletData) -> Vec<SerializedUTXO> {
     let mut utxos: Vec<SerializedUTXO> = wallet
         .unspent_utxos
         .iter()
-        .filter(|u| !crate::wallet::is_delegated_utxo(u) && u.is_mature())
+        .filter(|u| {
+            !crate::wallet::is_delegated_utxo(u) && u.is_mature() && u.matches_slot(0, 0)
+        })
         .cloned()
         .collect();
     utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
@@ -294,6 +318,15 @@ fn no_spendable_utxos_error(wallet: &WalletData) -> Box<dyn Error> {
         return format!(
             "No spendable transparent UTXOs: {immature} sat is in coinstake outputs that \
              have not reached maturity yet"
+        )
+        .into();
+    }
+    let rotated = wallet.get_rotated_balance();
+    if rotated > 0 {
+        return format!(
+            "No spendable transparent UTXOs: {rotated} sat sits at HD slots other than 0/0, \
+             which an ordinary send cannot sign for. Spend it with sendTransparentFromUtxos, \
+             passing that slot's fromChange/fromIndex and only its outputs"
         )
         .into();
     }
@@ -356,23 +389,51 @@ pub fn max_shieldable_transparent(wallet: &WalletData) -> u64 {
     total.saturating_sub(fee)
 }
 
-/// Reject a UTXO set containing the same outpoint more than once.
+/// Reject a UTXO set that cannot be turned into valid prevouts.
 ///
-/// An outpoint can only be spent once. A set containing a duplicate makes the
-/// wallet believe it holds twice the funds it does, and produces a transaction
-/// that spends one output twice, which the network rejects outright.
+/// Two failures, both of which produce a transaction rather than an error if
+/// they get through, which is why they are checked together at the one point
+/// every build path already passes through. Adding a build path without this
+/// call is the mistake this consolidation exists to prevent.
 ///
-/// [`crate::wallet::parse_blockbook_utxos`] already collapses duplicates,
-/// because explorers really do emit them mid-confirmation. This guard covers
-/// the paths that bypass the parser: `sendTransparentFromUtxos*`, where the
-/// caller hands in an exact set, and any `setUtxos` call built by other means.
+/// **Malformed txids.** A txid is decoded with the unchecked SIMD hex decoder
+/// and written straight into the prevout. Non-hex decodes to garbage and an
+/// odd length drops a nibble, so a bad txid yields either a structurally
+/// corrupt transaction (the prevout is not 32 bytes, and every byte after it
+/// shifts) or a well-formed one spending an outpoint that does not exist. The
+/// sighash is computed over the same wrong bytes, so the transaction is
+/// internally consistent and nothing downstream disagrees. It fails at
+/// broadcast, reported as missing inputs, which reads like a stale UTXO set
+/// rather than bad data. See [`SerializedUTXO::has_valid_txid`].
 ///
-/// Erroring rather than silently deduplicating is deliberate here. When a
-/// caller supplies the set explicitly, a duplicate means their own accounting
-/// is wrong: they have almost certainly computed recipient amounts against the
-/// doubled total. Quietly halving their inputs would build a transaction that
-/// does not match what they asked for.
-pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
+/// **Duplicate outpoints.** An outpoint can only be spent once. A set
+/// containing a duplicate makes the wallet believe it holds twice the funds it
+/// does, and produces a transaction that spends one output twice, which the
+/// network rejects outright.
+///
+/// [`crate::wallet::parse_blockbook_utxos`] screens both at ingest, because
+/// explorers really do emit duplicates mid-confirmation. This guard covers the
+/// paths that bypass the parser: `sendTransparentFromUtxos*`, where the caller
+/// hands in an exact set, and any `setUtxos` call built by other means.
+///
+/// Erroring rather than silently dropping is deliberate here. When a caller
+/// supplies the set explicitly, either fault means their own accounting is
+/// wrong: they have almost certainly computed recipient amounts against a total
+/// that includes the bad entry. Quietly shrinking their inputs would build a
+/// transaction that does not match what they asked for.
+pub(crate) fn validate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn Error>> {
+    for u in utxos {
+        if !u.has_valid_txid() {
+            return Err(format!(
+                "UTXO has a malformed txid {:?}: expected 64 hex characters, got {}. Signing \
+                 against it would produce a transaction spending an outpoint that does not \
+                 exist, which the network reports as missing inputs rather than as bad data",
+                u.txid,
+                u.txid.len(),
+            )
+            .into());
+        }
+    }
     for (i, u) in utxos.iter().enumerate() {
         if utxos[..i]
             .iter()
@@ -386,6 +447,90 @@ pub(crate) fn reject_duplicate_outpoints(utxos: &[SerializedUTXO]) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Reject inputs the key at `(from_change, from_index)` cannot sign for.
+///
+/// `sendTransparentFromUtxos*` derives exactly one key and signs every input
+/// with it. Hand it an output that was received at a different address and the
+/// result is a well-formed transaction with a signature that satisfies no
+/// input: the node rejects it, and the caller sees a broadcast failure with
+/// nothing pointing at the cause. That is the failure mode rotation invites,
+/// since a rotating consumer holds outputs at many slots at once and picks the
+/// set by hand.
+///
+/// Two independent checks, because each catches what the other cannot:
+///
+///  * **The slot tag.** Authoritative when present, and the only signal
+///    available for the ordinary case where explorers return no script. Absent
+///    means unknown and passes, preserving the existing contract that the
+///    caller vouches for the set (see [`SerializedUTXO::matches_slot`]).
+///  * **The scriptPubKey.** Independent of any bookkeeping the caller may have
+///    got wrong, so it catches a mis-tagged input as readily as an untagged
+///    one. Only available when the consumer joined scripts on, which the cold
+///    staking flows already require.
+fn reject_foreign_slot_utxos(
+    utxos: &[SerializedUTXO],
+    from_change: u32,
+    from_index: u32,
+    own_address: &str,
+    own_script: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    for u in utxos {
+        if !u.matches_slot(from_change, from_index) {
+            // `matches_slot` only returns false for a tagged UTXO, so the
+            // fallback is unreachable and the slot named below is the real one.
+            let slot = u.hd_slot.unwrap_or_default();
+            return Err(format!(
+                "UTXO {}:{} was received at HD slot {}/{}, but this send signs with the key at \
+                 {from_change}/{from_index} ({own_address}). Build one transaction per slot, or \
+                 drop the hdSlot tag if the outputs are not actually slot-specific",
+                u.txid, u.vout, slot.change, slot.index,
+            )
+            .into());
+        }
+
+        // Empty means "unknown", never "mismatch": most explorers omit it.
+        if u.script.is_empty() {
+            continue;
+        }
+        let script = crate::simd::hex::hex_string_to_bytes(&u.script);
+        if script == own_script {
+            continue;
+        }
+        // P2CS is caught earlier by the delegated-output guard, so anything
+        // reaching here that is not this key's P2PKH is unspendable by this
+        // path whatever it is. Name the owning address when the script is a
+        // readable P2PKH, since that is the case a rotating caller hits.
+        let owner = parse_p2pkh_hash(&script)
+            .map(|h| {
+                format!(
+                    "is paid to {}",
+                    crate::transparent::coldstake::encode_checked(
+                        crate::params::PIVX_PUBKEY_PREFIX,
+                        &h
+                    )
+                )
+            })
+            .unwrap_or_else(|| "is not a P2PKH output".to_string());
+        return Err(format!(
+            "UTXO {}:{} {}, which the key at {from_change}/{from_index} ({own_address}) cannot \
+             sign for. Signing it anyway would produce a transaction the network rejects",
+            u.txid, u.vout, owner,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// The hash160 inside a standard P2PKH scriptPubKey, if that is what this is.
+fn parse_p2pkh_hash(script: &[u8]) -> Option<[u8; 20]> {
+    if script.len() != 25 || script[..3] != [0x76, 0xa9, 0x14] || script[23..] != [0x88, 0xac] {
+        return None;
+    }
+    let mut hash = [0u8; 20];
+    hash.copy_from_slice(&script[3..23]);
+    Some(hash)
 }
 
 /// Build and sign a shielding transaction: transparent inputs → shield output(s).
@@ -433,7 +578,7 @@ pub fn create_shielding_transaction(
         _ => return Err("Own address is not transparent".into()),
     };
 
-    reject_duplicate_outpoints(&wallet.unspent_utxos)?;
+    validate_outpoints(&wallet.unspent_utxos)?;
     let utxos = spendable_utxos(wallet);
     if utxos.is_empty() {
         return Err(no_spendable_utxos_error(wallet));
@@ -464,12 +609,24 @@ pub fn create_shielding_transaction(
             0,
             sapling_output_count,
         );
-        if total >= amount + fee {
+        // Checked, for the same reason the amounts above are: `amount` comes
+        // from a JS caller. An unchecked `amount + fee` wraps in release, and a
+        // wrap to a small number makes this loop break early and the guard
+        // below pass, at which point `total - amount - fee` underflows into a
+        // colossal change output. The transparent selector already uses checked
+        // arithmetic here; this path was the one that did not.
+        let needed = amount
+            .checked_add(fee)
+            .ok_or("Amount plus fee overflows u64")?;
+        if total >= needed {
             break;
         }
     }
 
-    if total < amount + fee {
+    let needed = amount
+        .checked_add(fee)
+        .ok_or("Amount plus fee overflows u64")?;
+    if total < needed {
         return Err(format!(
             "Insufficient public balance. Have: {} sat, need: {} sat (amount) + {} sat (fee)",
             total, amount, fee
@@ -477,7 +634,7 @@ pub fn create_shielding_transaction(
         .into());
     }
 
-    let change = total - amount - fee;
+    let change = total - needed;
 
     let sapling_anchor = if crate::sapling::tree::is_empty_tree_hex(&wallet.commitment_tree) {
         Anchor::empty_tree()
@@ -503,8 +660,18 @@ pub fn create_shielding_transaction(
     for utxo in &selected {
         let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&utxo.txid);
         txid_bytes.reverse();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&txid_bytes);
+        // `validate_outpoints` has already guaranteed 32 bytes, so this is
+        // belt-and-braces, but the failure mode it replaces is bad enough to be
+        // worth the four lines: `copy_from_slice` panics on a length mismatch,
+        // and a panic in wasm poisons the module. The wallet would be dead for
+        // the rest of the page's life, not merely unable to build this one
+        // transaction.
+        let hash: [u8; 32] = txid_bytes.as_slice().try_into().map_err(|_| {
+            format!(
+                "UTXO {}:{} has a txid that is not 32 bytes",
+                utxo.txid, utxo.vout
+            )
+        })?;
         let outpoint = OutPoint::new(hash, utxo.vout);
 
         let txout = zcash_transparent::bundle::TxOut {
@@ -667,6 +834,12 @@ pub fn create_raw_transparent_transaction_to_many(
 ///     The caller hands in exactly the UTXOs they want to spend; the
 ///     function applies no selection on top.
 ///
+/// One slot per call: every input is signed with the one key, so a set
+/// spanning several addresses has to be split into one transaction each.
+/// Inputs that visibly belong elsewhere (by `hd_slot` tag or by
+/// `scriptPubKey`) are rejected rather than signed into a transaction the
+/// network would refuse.
+///
 /// Single recipient, single source. Any leftover (`total - amount -
 /// fee`) becomes a change output back to the *source* address (where
 /// the funds came from). Pass `amount = total - fee` to get exactly
@@ -704,6 +877,9 @@ pub fn create_raw_transparent_transaction_from_utxos(
 /// as a final change output. Pass recipient amounts summing to `total - fee` to
 /// get no change output at all.
 ///
+/// All inputs must belong to the one slot; see
+/// [`create_raw_transparent_transaction_from_utxos`].
+///
 /// `TransparentTransactionResult::amount` is the sum paid to recipients,
 /// excluding change and fee.
 pub fn create_raw_transparent_transaction_from_utxos_to_many(
@@ -718,7 +894,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     }
     // Every supplied UTXO is spent, so a repeated outpoint here would go
     // straight into the transaction as a double-spend.
-    reject_duplicate_outpoints(utxos)?;
+    validate_outpoints(utxos)?;
 
     // A delegated output cannot be spent by this path: it is P2CS, and signing
     // it against a P2PKH preimage yields a transaction the network rejects.
@@ -766,6 +942,8 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     let (own_address, pubkey_bytes, privkey_bytes) =
         keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
     let own_script = keys::address_to_p2pkh_script(&own_address)?;
+
+    reject_foreign_slot_utxos(utxos, from_change, from_index, &own_address, &own_script)?;
 
     // Sum all provided UTXOs: every one of them gets spent. Refund
     // addresses are single-use so there's nothing to leave behind.

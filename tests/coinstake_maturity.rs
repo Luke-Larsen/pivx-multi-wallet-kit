@@ -52,6 +52,7 @@ fn coinstake_utxo(letter: &str, amount: u64, confirmations: u32) -> SerializedUT
         height: 5_000_000,
         coinstake: true,
         confirmations,
+        ..Default::default()
     }
 }
 
@@ -67,6 +68,7 @@ fn staked_delegation(letter: &str, amount: u64, confirmations: u32) -> Serialize
         height: 5_000_000,
         coinstake: true,
         confirmations,
+        ..Default::default()
     }
 }
 

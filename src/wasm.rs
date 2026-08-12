@@ -17,7 +17,7 @@ use crate::sapling::builder::TransactionResult;
 use crate::sapling::prover;
 use crate::sapling::sync::{HandleBlocksResult, ShieldBlock};
 use crate::transparent::builder::{SpentOutpoint, TransparentTransactionResult};
-use crate::wallet::{SerializedNote, SerializedUTXO, WalletData};
+use crate::wallet::{HdSlot, SerializedNote, SerializedUTXO, WalletData};
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "multicore")]
@@ -297,6 +297,38 @@ impl Wallet {
         self.inner.get_transparent_address().map_err(js_err)
     }
 
+    /// The transparent (`D...`) address for a specific HD slot,
+    /// `m/44'/119'/0'/change/index`. `transparentAddress()` is `(0, 0)`.
+    ///
+    /// The transparent counterpart to `shieldAddressAt`, for consumers issuing
+    /// one receive address per invoice or per customer. It differs from the
+    /// shield case in what the caller owes afterwards, and the difference is
+    /// not small:
+    ///
+    ///  * **Every slot is a separate key.** Sapling diversified addresses all
+    ///    decrypt to one spending key, so the shield side needs no extra
+    ///    bookkeeping. Here each slot signs for itself.
+    ///  * **Discovery is yours.** Nothing scans for transparent outputs: query
+    ///    the explorer per address and ingest with `parseBlockbookUtxos`,
+    ///    passing the slot so the result is tagged. Keep your own cursor and
+    ///    gap limit.
+    ///  * **Spending is per slot.** `sendTransparentFromUtxos*` takes
+    ///    `fromChange`/`fromIndex` and signs every input with that one key, so
+    ///    one transaction per slot. The wallet-state sends
+    ///    (`sendTransparentToTransparent`, `sendTransparentToShield`,
+    ///    `delegateColdStake`) only ever reach `0/0`; anything tagged elsewhere
+    ///    is excluded from their selection and shows up in `rotatedBalanceSat`
+    ///    instead.
+    ///
+    /// Unlike `shieldAddressAt` there are no invalid indices to skip, so the
+    /// address for a given slot is exactly the one asked for.
+    #[wasm_bindgen(js_name = transparentAddressAt)]
+    pub fn transparent_address_at(&self, change: u32, index: u32) -> Result<String, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::keys::transparent_address_at(&bip39_seed, change, index).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = shieldBalanceSat)]
     pub fn shield_balance_sat(&self) -> u64 {
         self.inner.get_balance()
@@ -324,6 +356,19 @@ impl Wallet {
     #[wasm_bindgen(js_name = delegatedBalanceSat)]
     pub fn delegated_balance_sat(&self) -> u64 {
         self.inner.get_delegated_balance()
+    }
+
+    /// Value sitting at HD slots other than `0/0`, which the wallet-state sends
+    /// cannot sign for and therefore never select.
+    ///
+    /// Always 0 unless UTXOs carry `hdSlot`, so a consumer that does not rotate
+    /// transparent addresses never sees it. Move it with
+    /// `sendTransparentFromUtxos`, one call per slot. Overlaps
+    /// `delegatedBalanceSat` and `immatureBalanceSat`: a delegation received at
+    /// `0/5` is counted by both.
+    #[wasm_bindgen(js_name = rotatedBalanceSat)]
+    pub fn rotated_balance_sat(&self) -> u64 {
+        self.inner.get_rotated_balance()
     }
 
     /// Value an ordinary send can spend right now: excludes delegated outputs
@@ -376,6 +421,47 @@ impl Wallet {
         } else {
             crate::transparent::builder::max_sendable_transparent(&self.inner, 1)
         }
+    }
+
+    /// The largest amount a **shield-source** send to `toAddress` can pay,
+    /// after fee: the answer to "empty my shield balance".
+    ///
+    /// Distinct from `maxSendableSat`, which computes from transparent UTXOs in
+    /// *both* of its branches: passing it a `ps1…` address prices a shielding
+    /// send (transparent in, shield out), not a spend of your notes. This one
+    /// spends notes.
+    ///
+    /// Routes on the destination, because a transparent recipient costs a
+    /// transparent output and a shield one costs a Sapling output. Runs the
+    /// same fee model and output-shape rule the builder will, so the figure is
+    /// always buildable; it over-states the fee by one Sapling output, since a
+    /// max send emits no change but the shape charges for one either way.
+    ///
+    /// Returns 0 when nothing is sendable (no notes, the fee swallows the
+    /// balance, or the remainder would be dust at a transparent destination),
+    /// which a UI can treat as "disable the control".
+    #[wasm_bindgen(js_name = maxShieldSpendableSat)]
+    pub fn max_shield_spendable_sat(&self, to_address: &str) -> u64 {
+        crate::sapling::builder::max_shield_spendable(&self.inner, to_address)
+    }
+
+    /// Multi-recipient form of `maxShieldSpendableSat`: the largest *total* a
+    /// shield-source send to `transparentCount` transparent and `shieldCount`
+    /// shield recipients can pay.
+    ///
+    /// Split it however you like, as long as the parts sum to this and each
+    /// transparent part clears its dust threshold.
+    #[wasm_bindgen(js_name = maxShieldSpendableSatToMany)]
+    pub fn max_shield_spendable_sat_to_many(
+        &self,
+        transparent_count: u64,
+        shield_count: u64,
+    ) -> u64 {
+        crate::sapling::builder::max_shield_spendable_to_many(
+            &self.inner,
+            transparent_count,
+            shield_count,
+        )
     }
 
     /// Multi-recipient form of `maxSendableSat`: the largest *total* a send to
@@ -1219,11 +1305,27 @@ pub fn parse_shield_stream(
 ///   confirmations: u.confirmations,
 /// }))));
 /// ```
+///
+/// **Rotating consumers pass `hdSlot`.** The UTXO endpoint is per address, so
+/// the slot is known at the moment the response arrives, and tagging it here is
+/// what lets the builders tell one address's outputs from another's. Omit it
+/// and the outputs are untagged, which is the pre-existing behaviour: they stay
+/// selectable by the wallet-state sends, which sign them with the `0/0` key.
+///
+/// ```js
+/// // One address per invoice, ingested under its own slot.
+/// const addr = wallet.transparentAddressAt(0, invoice.slotIndex);
+/// const raw = await (await fetch(`${EXPLORER}/api/v2/utxo/${addr}`)).json();
+/// const { utxos } = parseBlockbookUtxos(raw, { change: 0, index: invoice.slotIndex });
+/// ```
 #[wasm_bindgen(js_name = parseBlockbookUtxos)]
-pub fn parse_blockbook_utxos(raw: JsValue) -> Result<BlockbookUtxosOut, JsError> {
+pub fn parse_blockbook_utxos(
+    raw: JsValue,
+    hd_slot: Option<HdSlot>,
+) -> Result<BlockbookUtxosOut, JsError> {
     let raw: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(raw).map_err(js_err)?;
     Ok(BlockbookUtxosOut {
-        utxos: crate::wallet::parse_blockbook_utxos(&raw),
+        utxos: crate::wallet::parse_blockbook_utxos_at(&raw, hd_slot),
     })
 }
 

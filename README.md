@@ -56,7 +56,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (222 total: 16 unit + 206 integration, many against real
+# Tests (281 total: 16 unit + 265 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -106,6 +106,11 @@ let mut w = wallet::import_wallet(&mnemonic, current_height)?;
 // Derive addresses (no prover needed):
 let shield      = keys::get_default_address(&w.extfvk)?;
 let transparent = w.get_transparent_address()?;
+
+// Rotate receive addresses. Shield diversifiers all share one spending key;
+// transparent slots are separate keys, so see "Rotating transparent addresses".
+let (used_index, invoice_shield) = keys::shield_address_at(&w.extfvk, next_index)?;
+let invoice_transparent = keys::transparent_address_at(&w.get_bip39_seed()?, 0, next_index)?;
 
 // Sign an arbitrary message with the transparent key (PIVX Core-compatible).
 let bip39_seed = w.get_bip39_seed()?;
@@ -157,6 +162,13 @@ const wallet = Wallet.fromMnemonic(phrase, currentHeight);
 
 const shield      = wallet.shieldAddress();
 const transparent = wallet.transparentAddress();
+
+// A fresh receive address per invoice. Shield rotation is free; transparent
+// rotation needs per-slot ingest and spending, see "Rotating transparent
+// addresses" below.
+// `usedIndex` may be past `nextIndex`: invalid diversifiers are skipped.
+const { index: usedIndex, address: invoiceShield } = wallet.shieldAddressAt(nextIndex);
+const invoiceTransparent = wallet.transparentAddressAt(0, nextIndex);
 
 // Sync transparent UTXOs from any Blockbook explorer. Cold staking needs one
 // more call per funding tx; see "Cold staking needs scripts" below.
@@ -315,11 +327,76 @@ Balance semantics are worth stating precisely, because the three overlap:
 
 | accessor | includes |
 |---|---|
-| `transparentBalanceSat` | ordinary outputs, mature only: what a plain send can spend right now |
+| `transparentBalanceSat` | ordinary outputs at HD slot `0/0` (or untagged), mature only: what a plain send can spend right now |
 | `delegatedBalanceSat` | every P2CS output, mature or not: what is committed to staking |
 | `immatureBalanceSat` | every coinstake/coinbase output below maturity, delegated or not |
+| `rotatedBalanceSat` | every output tagged to an HD slot other than `0/0`: see [Rotating transparent addresses](#rotating-transparent-addresses) |
 
-A freshly staked delegation appears in both `delegatedBalanceSat` and `immatureBalanceSat`, and in neither `transparentBalanceSat`. That is deliberate: one answers "what do I hold", the other "what is still landing".
+A freshly staked delegation appears in both `delegatedBalanceSat` and `immatureBalanceSat`, and in neither `transparentBalanceSat`. That is deliberate: one answers "what do I hold", the other "what is still landing". `rotatedBalanceSat` is 0 unless you rotate transparent addresses.
+
+### Rotating transparent addresses
+
+`transparentAddressAt(change, index)` derives the address at `m/44'/119'/0'/change/index`; `transparentAddress()` is the `(0, 0)` case. Use it for one address per invoice, per customer, or per anything else you want to keep unlinked on-chain.
+
+The two rotation stories look alike and are not:
+
+```js
+const { address } = wallet.shieldAddressAt(nextIndex);  // one key behind all of them
+const t = wallet.transparentAddressAt(0, nextIndex);    // a separate key each
+```
+
+Every Sapling address a wallet issues decrypts to the same spending key, so `shieldAddressAt` costs nothing: sync, balance and spending are unchanged no matter how many you hand out. Transparent slots are independent keys, which puts three things on you:
+
+**Discovery is yours.** Nothing in the kit scans for transparent outputs. Query the explorer once per address and keep your own cursor and gap limit.
+
+**Tag what you ingest.** A P2PKH UTXO carries no record of which address received it, so the kit cannot tell one slot's outputs from another's unless you say. Pass the slot to `parseBlockbookUtxos`:
+
+```js
+const addr = wallet.transparentAddressAt(0, invoice.slot);
+const raw  = await fetch(`/api/v2/utxo/${addr}`).then(r => r.json());
+const { utxos } = parseBlockbookUtxos(raw, { change: 0, index: invoice.slot });
+```
+
+**Spend one slot at a time.** `sendTransparentFromUtxos(fromChange, fromIndex, …)` derives one key and signs every input with it, paying change back to that same address. A set spanning two slots cannot become one valid transaction, so build one per slot.
+
+The tag is what makes the mistake loud instead of silent. Every wallet-state builder (`sendTransparentToTransparent`, `sendTransparentToMany`, `sendTransparentToShield`, `delegateColdStake`) signs with the `0/0` key, so a rotated output handed to one of them would be signed against the wrong script: a well-formed transaction whose signature satisfies no input, rejected at broadcast with nothing to point at. Tagged outputs are excluded from those builders' selection and surface in `rotatedBalanceSat` instead, and `sendTransparentFromUtxos*` rejects any input that disagrees with the slot it was asked to sign for:
+
+```
+UTXO abc…:0 was received at HD slot 0/9, but this send signs with the key at
+0/5 (D…). Build one transaction per slot, or drop the hdSlot tag if the
+outputs are not actually slot-specific
+```
+
+If you joined scripts on for cold staking, the same check runs against the `scriptPubKey` too, which catches a mis-tagged input as readily as an untagged one.
+
+Untagged UTXOs are unaffected: no tag means "unknown", never "not this slot", so everything written before `hdSlot` existed behaves exactly as it did, including consumers already rotating by tracking slots outside the kit.
+
+#### Cold staking is `0/0`-only on the delegating side
+
+The two halves of cold staking are not symmetric about the slot, and rotation is what makes the difference reachable:
+
+| | slot |
+|---|---|
+| `delegateColdStake` | funds from `0/0`, and writes `0/0` into the script as the owner |
+| `withdrawColdStake` / `withdrawColdStakeKeepingRest` | take `fromChange` / `fromIndex`, and can redeem a delegation owned by any slot |
+
+So anything the kit delegates is withdrawn with `(0, 0)`, and the withdrawal builders are the more general half because they also have to handle delegations this kit did not create. A P2CS output is indexed under its *owner's* address, so a rotating consumer querying the `0/0` address is the one who sees it, tags it `0/0`, and hands it back to a `(0, 0)` withdrawal. That round trip is consistent.
+
+Two things to know before rotating:
+
+**Delegating to your own rotated staking address does not move ownership.** `delegateColdStake(wallet.stakingAddressAt(0, 5), …)` builds a delegation staked by `0/5` and owned by `0/0`. It is a valid delegation and the coins stay under your control, but if you read that call as "self-stake at slot 5" you will look for the funds under `0/5` and not find them. Withdraw it at `(0, 0)`.
+
+**Rotated coins cannot fund a delegation.** There is no `delegateColdStakeFromUtxos`. Adding one would mean parameterising the owner slot as well as the funding slot, since the owner hash is baked into the P2CS script, and that is a larger change than this one. For now, move the coins to `0/0` first. Before the slot tag existed this case silently built a transaction signing `0/5`'s output with `0/0`'s key; now it is refused up front and says so:
+
+```
+No spendable transparent UTXOs available to fund a delegation: 900000000 sat sits at
+HD slots other than 0/0. A delegation is always funded from, and owned by, the key at
+0/0, so move the coins there first with sendTransparentFromUtxos before delegating
+```
+
+Withdrawals are unaffected in both directions. Change from a withdrawal at `0/5` returns to `0/5` rather than consolidating onto `0/0`, and re-delegated change (`withdrawColdStakeKeepingRest`) keeps the owner it came from. Those paths validate against the P2CS script's own owner hash rather than the `hdSlot` tag, which is stronger and independent of your bookkeeping: name the wrong slot and the error tells you which address actually owns the output.
+
+`change` and `index` are BIP32 non-hardened child numbers and stop at `2147483647`; past that, move to the next `change` level. Unlike `shieldAddressAt` there are no invalid indices to skip, so a slot's address is always exactly the one you asked for.
 
 #### Drive "send max" from `transparentBalanceSat`, not your own sum
 
@@ -350,10 +427,15 @@ if (max === 0n) {
 |---|---|
 | the balance to display | `transparentBalanceSat()` |
 | the most a send can pay | `maxSendableSat(destination)` |
+| the most a *shield* send can pay | `maxShieldSpendableSat(destination)` |
 | the fee for a specific amount | `estimateSendTransparentFee(destination, amount)` |
 | the fee actually paid | `result.fee`, after the send |
 
-All four apply the delegated-and-immature filter, so they agree with each other and with the builder. `result.fee` can exceed the estimate when dust change is absorbed into it, and is the number the user really paid.
+Every row except the shield one applies the same filter (delegated, immature, and outputs tagged to another HD slot), so they agree with each other and with the builder. `result.fee` can exceed the estimate when dust change is absorbed into it, and is the number the user really paid.
+
+**`maxSendableSat` never spends notes.** Both of its branches read transparent UTXOs: a `ps1…` destination prices a *shielding* send (transparent in, shield out), which is a different transaction from spending your shield balance. For that, use `maxShieldSpendableSat(destination)`, which computes from `unspentNotes` under the same fee model and output-shape rule the shield builder uses. It routes on the destination too, since a transparent recipient costs a transparent output and a shield one costs a Sapling output, and `maxShieldSpendableSatToMany(transparentCount, shieldCount)` is the multi-recipient form.
+
+The shield figure is buildable but not razor-sharp: the fee shape charges for a change note the max send does not emit, so it under-states by one Sapling output (~0.00948 PIV at the modelled rate). That is deliberate, and the same direction `maxSendableSat` errs in. Solving it exactly by hand is not worth attempting, because the fee grows with the number of notes selection reaches for, so the amount and the fee are mutually dependent.
 
 ## Status
 
@@ -390,6 +472,14 @@ anything delegated or still maturing. The kit now computes it against the same f
 fee model the builder uses. See [Drive "send max" from
 `transparentBalanceSat`](#drive-send-max-from-transparentbalancesat-not-your-own-sum).
 
+**Transparent receive addresses can be rotated.** `transparentAddressAt(change, index)`
+derives the address at any HD slot, and tagging a UTXO with the slot it arrived at keeps
+the wallet-state builders (which all sign with the `0/0` key) from selecting outputs they
+cannot sign for. Without the tag that mistake is silent until broadcast. Shield addresses
+were already rotatable and need none of this: every diversified address decrypts to one
+spending key. See [Rotating transparent
+addresses](#rotating-transparent-addresses).
+
 **One behaviour changed for everyone, not just cold staking.** PIVX rejects any output
 worth less than it costs to spend: `IsStandardTx` fails with `reason = "dust"`, so no
 node relays the transaction. The crate had no notion of this and would build
@@ -399,27 +489,41 @@ transactions nothing would accept. See *Upgrading to 0.4.0*.
 
 The cold-staking API is entirely new. One existing type changed shape:
 
-0. **`SerializedUTXO` gained `coinstake` and `confirmations`.** Both default to
-   "ordinary, immediately spendable".
+0. **`SerializedUTXO` gained `coinstake`, `confirmations` and `hdSlot`.** All three
+   default to "an ordinary, immediately spendable output at slot `0/0`".
    - *Rust consumers*: this is a breaking change if you build the struct with a literal.
-     Add `..Default::default()` (the type now derives `Default`) or set the two fields.
-   - *JS/TS consumers*: both are optional in the generated types, so nothing is required
-     of you. **But `parseBlockbookUtxos` reads them off the explorer response**, so if
-     your explorer already returns them, maturity enforcement turns itself on and coins
-     you could previously select become unselectable until they are 101 confirmations deep.
-     Blockbook proper returns neither key; rusty-blox returns both, plus `coinbase`,
-     which folds into the same flag. See [Staked delegations are coinstake
+     Add `..Default::default()` (the type now derives `Default`) or set the fields.
+   - *JS/TS consumers*: all three are optional in the generated types, so nothing is
+     required of you. **But `parseBlockbookUtxos` reads `coinstake` and `confirmations`
+     off the explorer response**, so if your explorer already returns them, maturity
+     enforcement turns itself on and coins you could previously select become
+     unselectable until they are 101 confirmations deep. Blockbook proper returns neither
+     key; rusty-blox returns both, plus `coinbase`, which folds into the same flag. See
+     [Staked delegations are coinstake
      outputs](#staked-delegations-are-coinstake-outputs) and the "send max" note above
      it, which is where this surfaces first.
-   - *Persisted wallets*: older JSON deserializes unchanged and reads as mature.
+   - `hdSlot` is different: it is never inferred, only ever set by you, and it changes
+     nothing until you set it. See [Rotating transparent
+     addresses](#rotating-transparent-addresses).
+   - *Persisted wallets*: older JSON deserializes unchanged, reading as mature and
+     untagged.
 
-One addition, which nothing you already call has to change to use:
+Three additions, which nothing you already call has to change to use:
 **`maxSendableSat(destination)` and `maxSendableSatToMany(count)`** give the largest
 amount a send can pay after fee, computed against the same filter and fee model the
 builder uses. Replace any locally computed "send max" with it: the local version
 over-counts delegated and immature coins.
 
-Three behaviours differ:
+**`maxShieldSpendableSat(destination)`** answers "empty my shield balance", which nothing
+previously did: both branches of `maxSendableSat` compute from transparent UTXOs, so a
+`ps1…` destination there prices a shielding send rather than a spend of notes.
+
+**`transparentAddressAt(change, index)`** derives the transparent address at any HD slot,
+the counterpart to `stakingAddressAt` for the same key. With `hdSlot` on `SerializedUTXO`
+and the new `rotatedBalanceSat`, that is enough to rotate transparent receive addresses
+safely: see [Rotating transparent addresses](#rotating-transparent-addresses).
+
+Five behaviours differ:
 
 1. **Dust outputs are now handled.** The threshold is 5460 sat for an ordinary output
    (6240 for a cold-staking one). Recipients below it are **rejected** rather than
@@ -431,7 +535,59 @@ Three behaviours differ:
    figure is the larger, true one. Consumers displaying a fee to users will show a
    slightly higher number in that case, which is the number the user actually pays.
 
-3. **`estimateSendTransparentFee` now excludes delegated and immature coins**, matching
+3. **Outpoints are validated before they are signed.** A `txid` must be 64 hex characters
+   and a `vout` must parse as an unsigned integer. Entries failing either are dropped by
+   `parseBlockbookUtxos`, and every builder refuses a set containing one rather than
+   signing it.
+
+   This closes a silent failure, not a loud one. A txid is decoded by an unchecked hex
+   decoder and written straight into the prevout, so a malformed one produced either a
+   structurally corrupt transaction or a well-formed transaction spending an outpoint that
+   does not exist, with the signature computed over the same wrong bytes either way. On
+   the shielding path it panicked, which in wasm poisons the module for the life of the
+   page. Separately, `vout` was read only as a JSON number while `value` was already read
+   as a number *or* a string, so an explorer returning `"1"` would have silently spent
+   vout 0: a real output, just not the selected one.
+
+   Nothing correct changes. If your explorer returns well-formed data you will not notice.
+   If you hand-build UTXOs for `setUtxos` or `sendTransparentFromUtxos*`, a bad entry now
+   fails at build time with a message naming it, instead of at broadcast as "missing
+   inputs".
+
+4. **Encrypted wallets now carry a nonce, and the old format is still readable.**
+   `encrypt_secrets` draws a fresh 16-byte nonce per call and stores it as `cipherNonce`
+   beside the ciphertext, and the seed and mnemonic get separately domain-tagged
+   keystreams.
+
+   This fixes a two-time pad. Both secrets were previously XORed against the *same*
+   keystream, because each `crypt` call restarted its counter at zero, so XORing the two
+   stored ciphertexts cancelled the keystream and yielded `seed XOR mnemonic[0..32]` to
+   anyone holding the file, with no key.
+
+   **On its own that is not a practical break.** Recovering the seed from the file alone
+   means guessing the mnemonic's first 32 characters, and there are 2^67.3 of them
+   (1.85e20, counted over the BIP39 English list), each needing a ZIP32 derivation to test
+   against the plaintext `extfvk`. What the leak actually does is destroy the margin, and
+   turn two situations that should be survivable into total compromise of the shield seed,
+   with no search at all:
+
+   - **Part of the mnemonic leaks by any other route.** Knowing the first five or six words
+     normally still leaves the rest out of reach. Here it yields the seed directly.
+   - **A second secret under the same key is known.** One known seed gives the keystream,
+     which decrypts every other wallet encrypted under that key. The native key is intended
+     to be machine-derived, so wallets on one machine share it.
+
+   Transparent funds were never reachable this way: the stored seed is `bip39_seed[..32]`,
+   enough for Sapling but not for the BIP32 transparent tree, which needs all 64 bytes via
+   the mnemonic. Shield funds are the exposure.
+
+   **Nothing breaks and no migration step is needed.** A wallet written before this reads
+   with the old keystream automatically (the absence of `cipherNonce` is the signal), and
+   re-saving it writes the new format. Move funds only if one of the two situations above
+   applies to a wallet whose encrypted file someone else may hold; a file alone, with no
+   other leak, was not practically attackable.
+
+5. **`estimateSendTransparentFee` now excludes delegated and immature coins**, matching
    the selection the builder performs. It previously quoted against the raw UTXO set, so
    it could price inputs no builder would reach for. Wallets with no delegations and no
    staking history see the same figure as before.
