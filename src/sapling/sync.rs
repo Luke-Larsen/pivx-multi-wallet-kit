@@ -372,6 +372,28 @@ fn handle_compact_transaction(
     let (num_outputs, c2) = read_compact_size(payload, 1 + c1)?;
     let mut pos = 1 + c1 + c2;
 
+    // A CompactSize can declare up to u64::MAX, and the count is read before a
+    // single byte of the body it describes. Sizing a buffer from it directly is
+    // not a large allocation that fails cleanly: `Vec::with_capacity` calls
+    // `handle_alloc_error`, which **aborts** rather than unwinding, so it is
+    // not catchable, and in wasm an abort takes the whole module down. The
+    // wallet would be dead for the rest of the page's life because an RPC node
+    // returned a corrupt packet.
+    //
+    // The payload itself is the bound: the loops below need 32 bytes per spend
+    // and `OUTPUT_SIZE` per output, so a count larger than the remaining bytes
+    // can hold is a truncated or malformed packet whichever way it is read.
+    // Compared by division so the check cannot itself overflow.
+    let remaining = payload.len() - pos;
+    if num_spends > remaining / 32 {
+        return Err(format!(
+            "compact tx declares {num_spends} spends but only {remaining} bytes remain, \
+             which holds at most {}",
+            remaining / 32
+        )
+        .into());
+    }
+
     let mut nullifiers = Vec::with_capacity(num_spends);
     for _ in 0..num_spends {
         if pos + 32 > payload.len() {
@@ -390,6 +412,19 @@ fn handle_compact_transaction(
     const ENC_CT_SIZE: usize = 580;
     const OUT_CT_SIZE: usize = 80;
     const OUTPUT_SIZE: usize = 32 + 32 + 32 + ENC_CT_SIZE + OUT_CT_SIZE;
+
+    // Same bound as the spend count above. This loop allocates per iteration
+    // rather than up front, so an inflated count costs time rather than an
+    // abort, but it is the same malformed packet and deserves the same answer.
+    let remaining = payload.len() - pos;
+    if num_outputs > remaining / OUTPUT_SIZE {
+        return Err(format!(
+            "compact tx declares {num_outputs} outputs but only {remaining} bytes remain, \
+             which holds at most {}",
+            remaining / OUTPUT_SIZE
+        )
+        .into());
+    }
 
     for _ in 0..num_outputs {
         if pos + OUTPUT_SIZE > payload.len() {
