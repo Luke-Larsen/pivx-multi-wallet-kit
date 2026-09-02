@@ -31,6 +31,7 @@
 //! starts from an empty tree, that is absolute verification rather than mutual
 //! consistency, so it needs no trusted anchor.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::sapling::sync::{ShieldBlock, handle_blocks};
 use pivx_wallet_kit::{checkpoints, sync, wallet};
 
@@ -62,7 +63,7 @@ fn main() {
     let highest = all.iter().map(|b| b.height).max().unwrap() as i32;
     println!("recording: fetched from {fetch_start}, shield blocks {lowest}..={highest} ({})\n", all.len());
 
-    let w = wallet::import_wallet(TEST_MNEMONIC, 100).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 100).unwrap();
     let cps = checkpoints::MAINNET_CHECKPOINTS;
     let (mut ok, mut bad, mut skipped) = (0, 0, 0);
 

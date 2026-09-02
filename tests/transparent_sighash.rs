@@ -23,6 +23,7 @@
 mod common;
 use common::{decode as parse_tx, verify_all_signatures};
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
@@ -61,11 +62,11 @@ fn utxo(txid_byte: &str, vout: u32, amount: u64) -> SerializedUTXO {
 #[test]
 fn signature_commits_to_transaction_with_change() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("b", 1, 100_000_000)];
 
     let result =
-        create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 5, &utxos, &to, 50_000_000)
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &to, 50_000_000)
             .expect("builder should produce a signed tx");
 
     let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
@@ -79,7 +80,7 @@ fn signature_commits_to_transaction_with_change() {
     assert_eq!(verified, 1);
 
     // The recipient output must carry the exact requested amount.
-    let to_script = keys::address_to_p2pkh_script(&to).unwrap();
+    let to_script = keys::address_to_p2pkh_script(Chain::Pivx, &to).unwrap();
     let recipient = tx
         .outputs
         .iter()
@@ -97,15 +98,15 @@ fn signature_commits_to_transaction_with_change() {
 #[test]
 fn signature_commits_to_transaction_without_change() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("c", 0, 100_000_000)];
 
     // amount = total - fee leaves nothing over.
-    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2);
     let amount = 100_000_000 - fee;
 
     let result =
-        create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 5, &utxos, &to, amount)
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &to, amount)
             .expect("builder should produce a signed tx");
 
     let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
@@ -122,7 +123,7 @@ fn signature_commits_to_transaction_without_change() {
 #[test]
 fn every_input_signature_is_independently_valid() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![
         utxo("a", 0, 100_000_000),
         utxo("b", 1, 200_000_000),
@@ -130,7 +131,7 @@ fn every_input_signature_is_independently_valid() {
     ];
 
     let result =
-        create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 3, &utxos, &to, 250_000_000)
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 3, &utxos, &to, 250_000_000)
             .expect("builder should produce a signed tx");
 
     let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
@@ -158,11 +159,11 @@ fn every_input_signature_is_independently_valid() {
 #[test]
 fn verifier_rejects_a_tampered_output_value() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("d", 0, 100_000_000)];
 
     let result =
-        create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 5, &utxos, &to, 50_000_000)
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &to, 50_000_000)
             .expect("builder should produce a signed tx");
 
     let mut tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
@@ -190,19 +191,19 @@ fn verifier_rejects_a_tampered_output_value() {
 #[test]
 fn verifier_rejects_a_redirected_output() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("e", 0, 100_000_000)];
 
     let result =
-        create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 5, &utxos, &to, 50_000_000)
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &to, 50_000_000)
             .expect("builder should produce a signed tx");
 
     let mut tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
     assert_eq!(verify_all_signatures(&tx), 1);
 
     // Repoint an output at an unrelated address.
-    let attacker = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 99).unwrap().0;
-    tx.outputs[0].script_pubkey = keys::address_to_p2pkh_script(&attacker).unwrap();
+    let attacker = keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 99).unwrap().0;
+    tx.outputs[0].script_pubkey = keys::address_to_p2pkh_script(Chain::Pivx, &attacker).unwrap();
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         verify_all_signatures(&tx);
@@ -223,7 +224,7 @@ fn verifier_rejects_a_redirected_output() {
 fn distinct_addresses(bip39_seed: &[u8], n: u32) -> Vec<String> {
     (0..n)
         .map(|i| {
-            keys::transparent_key_from_bip39_seed(bip39_seed, 0, 100 + i)
+            keys::transparent_key_from_bip39_seed(Chain::Pivx, bip39_seed, 0, 100 + i)
                 .unwrap()
                 .0
         })
@@ -248,7 +249,7 @@ fn multi_recipient_signature_commits_to_every_output() {
     ];
     let utxos = vec![utxo("a", 0, 100_000_000)];
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &recipients,
     )
     .expect("multi-recipient build should succeed");
@@ -263,7 +264,7 @@ fn multi_recipient_signature_commits_to_every_output() {
 
     // Recipient order must be preserved, with the right amount at each slot.
     for (i, r) in recipients.iter().enumerate() {
-        let expected_script = keys::address_to_p2pkh_script(&r.address).unwrap();
+        let expected_script = keys::address_to_p2pkh_script(Chain::Pivx, &r.address).unwrap();
         assert_eq!(
             tx.outputs[i].script_pubkey, expected_script,
             "output {i} pays the wrong address: recipient order was not preserved"
@@ -275,10 +276,10 @@ fn multi_recipient_signature_commits_to_every_output() {
     }
 
     // Change is last and returns to the source address.
-    let source = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap().0;
+    let source = keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 5).unwrap().0;
     assert_eq!(
         tx.outputs[3].script_pubkey,
-        keys::address_to_p2pkh_script(&source).unwrap(),
+        keys::address_to_p2pkh_script(Chain::Pivx, &source).unwrap(),
         "change must return to the source address"
     );
 
@@ -299,7 +300,7 @@ fn multi_recipient_without_change() {
     let utxos = vec![utxo("b", 0, 100_000_000)];
 
     // 2 recipients + assumed change = 3 outputs in the fee model.
-    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 3);
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 3);
     let half = (100_000_000 - fee) / 2;
     let recipients = vec![
         Recipient { address: addrs[0].clone(), amount: half },
@@ -307,7 +308,7 @@ fn multi_recipient_without_change() {
         Recipient { address: addrs[1].clone(), amount: 100_000_000 - fee - half },
     ];
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &recipients,
     )
     .expect("build should succeed");
@@ -341,7 +342,7 @@ fn multi_recipient_multi_input() {
         utxo("d", 3, 50_000_000),
     ];
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &recipients,
     )
     .expect("build should succeed");
@@ -373,7 +374,7 @@ fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
     ];
     let utxos = vec![utxo("c", 0, 100_000_000)];
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &recipients,
     )
     .unwrap();
@@ -382,8 +383,8 @@ fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
     assert_eq!(verify_all_signatures(&tx), 1);
 
     // Redirect the middle recipient's payment.
-    let attacker = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 99).unwrap().0;
-    tx.outputs[1].script_pubkey = keys::address_to_p2pkh_script(&attacker).unwrap();
+    let attacker = keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 99).unwrap().0;
+    tx.outputs[1].script_pubkey = keys::address_to_p2pkh_script(Chain::Pivx, &attacker).unwrap();
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         verify_all_signatures(&tx);
@@ -410,7 +411,7 @@ fn multi_recipient_verifier_rejects_reordered_outputs() {
     ];
     let utxos = vec![utxo("d", 0, 100_000_000)];
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &recipients,
     )
     .unwrap();
@@ -434,15 +435,15 @@ fn multi_recipient_verifier_rejects_reordered_outputs() {
 #[test]
 fn single_recipient_is_byte_identical_through_both_entry_points() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("e", 0, 100_000_000), utxo("f", 1, 50_000_000)];
 
-    let legacy = create_raw_transparent_transaction_from_utxos(
+    let legacy = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &bip39_seed, 0, 5, &utxos, &to, 50_000_000,
     )
     .unwrap();
 
-    let via_many = create_raw_transparent_transaction_from_utxos_to_many(
+    let via_many = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -470,7 +471,7 @@ fn multi_recipient_rejects_invalid_input() {
 
     // Empty recipient list.
     assert!(
-        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &[])
+        create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &[])
             .is_err(),
         "empty recipient list should be rejected"
     );
@@ -478,7 +479,7 @@ fn multi_recipient_rejects_invalid_input() {
     // Zero-value payment.
     let zero = vec![Recipient { address: addrs[0].clone(), amount: 0 }];
     assert!(
-        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &zero)
+        create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &zero)
             .is_err(),
         "zero-amount recipient should be rejected"
     );
@@ -489,7 +490,7 @@ fn multi_recipient_rejects_invalid_input() {
         Recipient { address: addrs[0].clone(), amount: 1 },
     ];
     assert!(
-        create_raw_transparent_transaction_from_utxos_to_many(
+        create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &bip39_seed, 0, 5, &utxos, &overflow
         )
         .is_err(),
@@ -503,7 +504,7 @@ fn multi_recipient_rejects_invalid_input() {
         amount: 10_000_000,
     }];
     assert!(
-        create_raw_transparent_transaction_from_utxos_to_many(&bip39_seed, 0, 5, &utxos, &shield)
+        create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, &bip39_seed, 0, 5, &utxos, &shield)
             .is_err(),
         "shield recipient should be rejected from the raw transparent path"
     );
@@ -514,7 +515,7 @@ fn multi_recipient_rejects_invalid_input() {
         Recipient { address: addrs[0].clone(), amount: 60_000_000 },
     ];
     assert!(
-        create_raw_transparent_transaction_from_utxos_to_many(
+        create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &bip39_seed, 0, 5, &utxos, &too_much
         )
         .is_err(),
@@ -530,7 +531,7 @@ fn multi_recipient_rejects_invalid_input() {
 #[test]
 fn signature_holds_across_the_output_count_varint_boundary() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
     // 251/252 recipients => 252/253 outputs with change: either side of the
     // boundary. Plus a couple beyond it.
@@ -540,7 +541,7 @@ fn signature_holds_across_the_output_count_varint_boundary() {
             .map(|_| Recipient { address: to.clone(), amount: 1_000_000 })
             .collect();
 
-        let result = create_raw_transparent_transaction_from_utxos_to_many(
+        let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &bip39_seed, 0, 5, &utxos, &recipients,
         )
         .unwrap_or_else(|e| panic!("{n} recipients failed to build: {e}"));
@@ -567,14 +568,14 @@ fn signature_holds_across_the_output_count_varint_boundary() {
 #[test]
 fn signature_holds_across_the_input_count_varint_boundary() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
     for n in [252usize, 253, 260] {
         let utxos: Vec<SerializedUTXO> = (0..n)
             .map(|i| utxo("b", i as u32, 1_000_000))
             .collect();
 
-        let result = create_raw_transparent_transaction_from_utxos_to_many(
+        let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &bip39_seed,
             0,
             5,
@@ -600,15 +601,15 @@ fn signature_holds_across_the_input_count_varint_boundary() {
 #[test]
 fn dust_recipients_are_rejected() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("c", 0, 100_000_000)];
 
     // 5460 sat for a 25-byte P2PKH script.
-    let threshold = pivx_wallet_kit::fees::dust_threshold(25);
+    let threshold = pivx_wallet_kit::fees::dust_threshold(Chain::Pivx, 25);
     assert_eq!(threshold, 5_460, "P2PKH dust threshold changed");
 
     for amount in [1u64, 100, threshold - 1] {
-        let err = create_raw_transparent_transaction_from_utxos_to_many(
+        let err = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &bip39_seed,
             0,
             5,
@@ -621,7 +622,7 @@ fn dust_recipients_are_rejected() {
     }
 
     // Exactly at the threshold is fine, and still signs correctly.
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -641,15 +642,15 @@ fn dust_recipients_are_rejected() {
 #[test]
 fn dust_change_is_absorbed_into_the_fee() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let total = 100_000_000u64;
     let utxos = vec![utxo("d", 0, total)];
 
     // Aim to leave 1000 sat of change: well under the 5460 threshold.
-    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2);
     let amount = total - fee - 1_000;
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -672,15 +673,15 @@ fn dust_change_is_absorbed_into_the_fee() {
 #[test]
 fn non_dust_change_is_emitted() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let total = 100_000_000u64;
     let utxos = vec![utxo("e", 0, total)];
 
-    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2);
     let change = 10_000u64; // comfortably above 5460
     let amount = total - fee - change;
 
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -704,10 +705,10 @@ fn non_dust_change_is_emitted() {
 #[test]
 fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
     let duplicated = vec![utxo("a", 0, 100_000_000), utxo("a", 0, 100_000_000)];
-    let err = create_raw_transparent_transaction_from_utxos_to_many(
+    let err = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -723,7 +724,7 @@ fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
 
     // Same txid but different vouts are distinct outpoints and must be allowed.
     let distinct = vec![utxo("a", 0, 100_000_000), utxo("a", 1, 100_000_000)];
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -752,14 +753,14 @@ fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
 #[test]
 fn serialized_transaction_has_no_trailing_or_missing_bytes() {
     let bip39_seed = seed();
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
     for input_count in 1..=4usize {
         let utxos: Vec<SerializedUTXO> = (0..input_count)
             .map(|i| utxo("f", i as u32, 100_000_000))
             .collect();
 
-        let result = create_raw_transparent_transaction_from_utxos(
+        let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
             &bip39_seed,
             0,
             5,

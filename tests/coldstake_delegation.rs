@@ -14,6 +14,7 @@
 mod common;
 use common::{decode, verify_all_signatures as verify_signatures};
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::coldstake::{
@@ -44,7 +45,7 @@ fn utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
@@ -83,7 +84,7 @@ fn delegation_produces_a_signed_p2cs_output() {
 
     // The owner must be this wallet's own key, or the delegation is unspendable
     // by its creator.
-    let own = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let own = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     let own_pkh = bs58::decode(&own).into_vec().unwrap()[1..21].to_vec();
     assert_eq!(hashes.owner.to_vec(), own_pkh, "owner is not the wallet's own key");
 
@@ -115,7 +116,7 @@ fn recovered_addresses_match_the_request() {
     let (recovered_staking, recovered_owner) = addresses_from_p2cs_script(&tx.outputs[0].script_pubkey).unwrap();
 
     assert_eq!(recovered_staking, staking);
-    assert_eq!(recovered_owner, keys::get_transparent_address(TEST_MNEMONIC).unwrap());
+    assert_eq!(recovered_owner, keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap());
 }
 
 /// Tampering with the P2CS script after signing must invalidate: the check
@@ -206,7 +207,7 @@ fn estimator_matches_the_builder() {
 fn delegation_fee_exceeds_the_p2pkh_equivalent() {
     let w = wallet_with(vec![utxo("a", 0, 500_000_000)]);
     let delegation = estimate_delegation_fee(&w, &staking_addr(), 200_000_000).unwrap();
-    let p2pkh = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let p2pkh = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2);
 
     assert!(
         delegation > p2pkh,
@@ -222,7 +223,7 @@ fn delegation_fee_exceeds_the_p2pkh_equivalent() {
 #[test]
 fn rejects_invalid_delegations() {
     let staking = staking_addr();
-    let owner = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let owner = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
     // Below the 1 PIV minimum.
     let mut w = wallet_with(vec![utxo("a", 0, 500_000_000)]);

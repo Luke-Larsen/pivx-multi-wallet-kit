@@ -11,6 +11,7 @@
 //! is correct, because an under-estimate strands a transaction unconfirmed
 //! with no error anyone can trace back to this code.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::sapling::builder::{ShieldRecipient, shield_recipient_fee_shape};
 
@@ -28,7 +29,7 @@ fn shield_address() -> String {
 }
 
 fn transparent_address() -> String {
-    keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 fn shield_recipient(address: &str, amount: u64) -> ShieldRecipient {

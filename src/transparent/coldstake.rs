@@ -27,9 +27,10 @@
 //! `D...`). The offsets here follow Core's `MatchPayToColdStaking`, which is
 //! unambiguous.
 
+use crate::base58check::{decode_checked, encode_checked};
 use crate::fees;
 use crate::keys;
-use crate::params::{PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
+use crate::params::{Chain, PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
 use crate::transparent::builder::{
     SigningInput, SpentOutpoint, TransparentTransactionResult, TxOutput,
     validate_outpoints, sign_and_serialize,
@@ -143,51 +144,6 @@ pub struct ColdStakeHashes {
     pub staker: [u8; 20],
     /// May spend the output.
     pub owner: [u8; 20],
-}
-
-/// Decode a Base58Check address, returning `(version, hash160)`.
-///
-/// Shares the checksum discipline of the P2PKH path: an unverified address is
-/// how funds reach a hash nobody holds a key for, and a delegation locks the
-/// coins behind *two* hashes, so a typo in either is equally unrecoverable.
-fn decode_checked(address: &str) -> Result<(u8, [u8; 20]), Box<dyn Error>> {
-    use sha2::{Digest, Sha256};
-
-    let decoded = bs58::decode(address)
-        .into_vec()
-        .map_err(|e| format!("Invalid base58 address: {e}"))?;
-    if decoded.len() != 25 {
-        return Err(format!(
-            "Invalid address length: {} bytes, expected 25 (1 version + 20 hash + 4 checksum)",
-            decoded.len()
-        )
-        .into());
-    }
-
-    let (payload, checksum) = decoded.split_at(21);
-    let expected = Sha256::digest(Sha256::digest(payload));
-    if expected[..4] != checksum[..] {
-        return Err(format!(
-            "Invalid address checksum for {address}: the address is mistyped or corrupted"
-        )
-        .into());
-    }
-
-    let mut hash = [0u8; 20];
-    hash.copy_from_slice(&payload[1..21]);
-    Ok((payload[0], hash))
-}
-
-/// Base58Check-encode `hash160` under `version`.
-pub(crate) fn encode_checked(version: u8, hash: &[u8; 20]) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut payload = Vec::with_capacity(25);
-    payload.push(version);
-    payload.extend_from_slice(hash);
-    let checksum = Sha256::digest(Sha256::digest(&payload));
-    payload.extend_from_slice(&checksum[..4]);
-    bs58::encode(payload).into_string()
 }
 
 /// Encode a staking (`S...`) address from a key hash.
@@ -375,7 +331,7 @@ pub fn owner_hash_from_seed(
     index: u32,
 ) -> Result<[u8; 20], Box<dyn Error>> {
     let (address, _pubkey, _priv) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, change, index)?;
+        keys::transparent_key_from_bip39_seed(Chain::Pivx, bip39_seed, change, index)?;
     decode_owner_address(&address)
 }
 
@@ -419,7 +375,7 @@ pub fn create_delegation_transaction(
     let selection = select_for_delegation(wallet, staking_address, amount)?;
 
     let (own_address, pubkey_bytes, privkey_bytes) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, 0, 0)?;
+        keys::transparent_key_from_bip39_seed(Chain::Pivx, bip39_seed, 0, 0)?;
     let owner = decode_owner_address(&own_address)?;
     let staker = decode_staking_address(staking_address)?;
     let own_script = p2pkh_script_from_hash(&owner);
@@ -435,7 +391,7 @@ pub fn create_delegation_transaction(
     let change = selection.total - amount - selection.fee;
     // Dust change would make the transaction non-standard; drop it to the miner
     // instead, exactly as the transparent builders do.
-    if change > 0 && !fees::is_dust(change, own_script.len()) {
+    if change > 0 && !fees::is_dust(Chain::Pivx, change, own_script.len()) {
         outputs.push(TxOutput { value: change, script: own_script.clone() });
     }
 
@@ -588,7 +544,7 @@ pub fn create_coldstake_withdrawal_with_change(
     validate_outpoints(delegated)?;
 
     let (own_address, pubkey_bytes, privkey_bytes) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
+        keys::transparent_key_from_bip39_seed(Chain::Pivx, bip39_seed, from_change, from_index)?;
     let owner = decode_owner_address(&own_address)?;
     let own_script = p2pkh_script_from_hash(&owner);
 
@@ -661,7 +617,7 @@ pub fn create_coldstake_withdrawal_with_change(
         WithdrawalChange::Delegate(_) => fees::P2CS_OUTPUT_EXTRA_BYTES,
         WithdrawalChange::Plain => 0,
     };
-    let fee = fees::estimate_raw_transparent_fee_with_extra(
+    let fee = fees::estimate_raw_transparent_fee_with_extra(Chain::Pivx, 
         delegated.len(),
         2,
         delegated.len() + change_surcharge,
@@ -674,12 +630,12 @@ pub fn create_coldstake_withdrawal_with_change(
         .into());
     }
 
-    let destination = keys::address_to_p2pkh_script(to_address)?;
-    if fees::is_dust(amount, destination.len()) {
+    let destination = keys::address_to_p2pkh_script(Chain::Pivx, to_address)?;
+    if fees::is_dust(Chain::Pivx, amount, destination.len()) {
         return Err(format!(
             "Withdrawal of {amount} sat is below the dust threshold of {} sat: a transaction \
              containing a dust output is non-standard and will not relay",
-            fees::dust_threshold(destination.len())
+            fees::dust_threshold(Chain::Pivx, destination.len())
         )
         .into());
     }
@@ -696,7 +652,7 @@ pub fn create_coldstake_withdrawal_with_change(
             }
             _ => own_script,
         };
-        if !fees::is_dust(change, change_script.len()) {
+        if !fees::is_dust(Chain::Pivx, change, change_script.len()) {
             outputs.push(TxOutput { value: change, script: change_script });
         }
     }
@@ -723,7 +679,7 @@ pub fn create_coldstake_withdrawal_with_change(
 /// by the dropped amount. The estimator cannot see that from the input count
 /// alone. `TransparentTransactionResult::fee` always reports the true figure.
 pub fn estimate_coldstake_withdrawal_fee(input_count: usize) -> u64 {
-    fees::estimate_raw_transparent_fee_with_extra(input_count, 2, input_count)
+    fees::estimate_raw_transparent_fee_with_extra(Chain::Pivx, input_count, 2, input_count)
 }
 
 struct DelegationSelection {
@@ -795,7 +751,7 @@ fn select_for_delegation(
     // declared per piece rather than silently under-paid.
     let piece_count = split_delegation_amounts(amount, STAKE_SPLIT_TARGET).len();
     let fee_for = |input_count: usize| {
-        fees::estimate_raw_transparent_fee_with_extra(
+        fees::estimate_raw_transparent_fee_with_extra(Chain::Pivx, 
             input_count,
             piece_count + 1,
             piece_count * fees::P2CS_OUTPUT_EXTRA_BYTES,

@@ -27,6 +27,7 @@
 //! until the guard added here caught them, which is the whole argument for
 //! having it: nothing else in the system was positioned to notice.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
@@ -47,7 +48,7 @@ fn seed() -> Vec<u8> {
 }
 
 fn to_address() -> String {
-    keys::pubkey_to_pivx_address(&[0x02; 33])
+    keys::pubkey_to_address(Chain::Pivx, &[0x02; 33])
 }
 
 fn utxo(txid: &str, amount: u64) -> SerializedUTXO {
@@ -62,7 +63,7 @@ fn utxo(txid: &str, amount: u64) -> SerializedUTXO {
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
@@ -90,7 +91,7 @@ fn a_well_formed_txid_is_accepted_in_either_case() {
     // Uppercase hex decodes identically, so it must not be rejected: some
     // explorers and hand-built sets use it.
     for txid in ["ab".repeat(32), "AB".repeat(32), "aBcD".repeat(16)] {
-        create_raw_transparent_transaction_from_utxos(
+        create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
             &seed(),
             0,
             0,
@@ -105,7 +106,7 @@ fn a_well_formed_txid_is_accepted_in_either_case() {
 #[test]
 fn the_caller_supplied_builder_refuses_every_malformed_txid() {
     for (why, txid) in malformed() {
-        let err = create_raw_transparent_transaction_from_utxos(
+        let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
             &seed(),
             0,
             0,
@@ -127,7 +128,7 @@ fn the_wallet_state_builder_refuses_every_malformed_txid() {
     // of the parser's screening.
     for (why, txid) in malformed() {
         let mut w = wallet_with(vec![utxo(&txid, 500_000)]);
-        let err = create_raw_transparent_transaction_to_many(&mut w, &seed(), &one(100_000))
+        let err = create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &one(100_000))
             .expect_err(&format!("{why}: a malformed txid was signed instead of refused"));
         assert!(
             err.to_string().contains("malformed txid"),
@@ -141,7 +142,7 @@ fn the_estimator_refuses_what_the_builder_refuses() {
     // The estimator shares the selector, so it has to fail for the same reason
     // rather than quoting a fee for a transaction that cannot be built.
     let w = wallet_with(vec![utxo(&"z".repeat(64), 500_000)]);
-    let err = estimate_raw_transparent_fee_to_many(&w, &one(100_000)).unwrap_err();
+    let err = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &one(100_000)).unwrap_err();
     assert!(err.to_string().contains("malformed txid"), "got {err}");
 }
 
@@ -211,7 +212,7 @@ fn a_valid_transaction_parses_back_to_exactly_its_own_length() {
     // The property a malformed txid breaks: the emitted bytes have to be a
     // transaction. A short or long prevout shifts everything after it, so
     // walking the structure lands somewhere other than the end of the buffer.
-    let result = create_raw_transparent_transaction_from_utxos(
+    let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         0,

@@ -10,6 +10,7 @@
 //! Reference: `MatchPayToColdStaking` and `CScript::IsPayToColdStaking` in PIVX
 //! Core, cross-checked against MyPIVXWallet's `isP2CS` / `addColdStakeOutput`.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::params::{PIVX_PUBKEY_PREFIX, PIVX_STAKING_PREFIX};
 use pivx_wallet_kit::transparent::coldstake::{
     self, ColdStakeVariant, P2CS_SCRIPT_LEN, addresses_from_p2cs_script, build_p2cs_owner_script_sig,
@@ -340,7 +341,7 @@ fn owner_hash_matches_the_derived_key() {
 
     for index in [0u32, 1, 7, 100] {
         let (address, pubkey, _priv) =
-            pivx_wallet_kit::keys::transparent_key_from_bip39_seed(&seed, 0, index).unwrap();
+            pivx_wallet_kit::keys::transparent_key_from_bip39_seed(Chain::Pivx, &seed, 0, index).unwrap();
 
         let from_seed = coldstake::owner_hash_from_seed(&seed, 0, index).unwrap();
         let from_address = decode_owner_address(&address).unwrap();

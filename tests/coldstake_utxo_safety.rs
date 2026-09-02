@@ -15,6 +15,7 @@
 //! should arrange, by joining `/api/v2/tx/{txid}` → `vout[n].hex` onto each
 //! entry before `parse_blockbook_utxos` sees it.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
     Recipient, create_raw_transparent_transaction_from_utxos_to_many,
@@ -62,13 +63,13 @@ fn delegated(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    pivx_wallet_kit::keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    pivx_wallet_kit::keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 fn recipients(amount: u64) -> Vec<Recipient> {
@@ -118,7 +119,7 @@ fn ordinary_sends_skip_delegated_outputs() {
         ordinary("e", 1, 50_000_000),
     ]);
 
-    let result = create_raw_transparent_transaction_to_many(&mut w, &seed(), &recipients(10_000_000))
+    let result = create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &recipients(10_000_000))
         .expect("the ordinary UTXO alone should cover this");
 
     assert_eq!(result.spent.len(), 1);
@@ -135,7 +136,7 @@ fn ordinary_sends_skip_delegated_outputs() {
 fn a_wholly_delegated_wallet_explains_itself() {
     let mut w = wallet_with(vec![delegated("d", 0, 300_000_000)]);
 
-    let err = create_raw_transparent_transaction_to_many(&mut w, &seed(), &recipients(1_000_000))
+    let err = create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &recipients(1_000_000))
         .expect_err("nothing is spendable")
         .to_string();
 
@@ -154,14 +155,14 @@ fn the_estimator_also_skips_delegated_outputs() {
         ordinary("e", 1, 50_000_000),
     ]);
 
-    let quoted = estimate_raw_transparent_fee_to_many(&w, &recipients(10_000_000)).unwrap();
+    let quoted = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(10_000_000)).unwrap();
     let built =
-        create_raw_transparent_transaction_to_many(&mut w, &seed(), &recipients(10_000_000)).unwrap();
+        create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &recipients(10_000_000)).unwrap();
     assert_eq!(quoted, built.fee);
 
     // And it refuses when only delegated funds remain.
     let w2 = wallet_with(vec![delegated("d", 0, 300_000_000)]);
-    assert!(estimate_raw_transparent_fee_to_many(&w2, &recipients(1_000_000)).is_err());
+    assert!(estimate_raw_transparent_fee_to_many(Chain::Pivx, &w2, &recipients(1_000_000)).is_err());
 }
 
 /// The from-UTXOs path takes an explicit set, so a delegated entry is a caller
@@ -169,7 +170,7 @@ fn the_estimator_also_skips_delegated_outputs() {
 /// build a transaction that does not match what was asked for.
 #[test]
 fn the_from_utxos_path_rejects_delegated_inputs() {
-    let err = create_raw_transparent_transaction_from_utxos_to_many(
+    let err = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &seed(),
         0,
         0,
@@ -217,7 +218,7 @@ fn wallets_without_scripts_behave_as_before() {
     assert_eq!(w.get_delegated_balance(), 0);
 
     let result =
-        create_raw_transparent_transaction_to_many(&mut w, &seed(), &recipients(120_000_000))
+        create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &recipients(120_000_000))
             .expect("both UTXOs are spendable");
     assert_eq!(result.spent.len(), 2);
 }

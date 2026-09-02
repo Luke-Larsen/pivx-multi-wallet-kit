@@ -18,6 +18,7 @@
 //! though: `parse_blockbook_utxos` reads the flag from the explorer response
 //! when it is there, and rusty-blox supplies it.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::params::COINBASE_MATURITY;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
@@ -73,13 +74,13 @@ fn staked_delegation(letter: &str, amount: u64, confirmations: u32) -> Serialize
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    pivx_wallet_kit::keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    pivx_wallet_kit::keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +251,7 @@ fn a_freshly_staked_delegation_counts_as_delegated_and_immature() {
 #[test]
 fn an_ordinary_send_will_not_select_an_immature_coinstake() {
     let mut w = wallet_with(vec![coinstake_utxo("a", 100_000_000, 5)]);
-    let err = create_raw_transparent_transaction_to_many(
+    let err = create_raw_transparent_transaction_to_many(Chain::Pivx, 
         &mut w,
         &seed(),
         &[Recipient { address: to_address(), amount: 1_000_000 }],
@@ -287,7 +288,7 @@ fn a_delegation_cannot_be_funded_from_an_immature_coinstake() {
 /// case this one clears on its own.
 #[test]
 fn spending_a_named_immature_utxo_errors_with_the_wait() {
-    let err = create_raw_transparent_transaction_from_utxos_to_many(
+    let err = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &seed(),
         0,
         0,

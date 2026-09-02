@@ -13,6 +13,7 @@
 //! `pivx_wallet_kit::keys`, etc.) directly: this module is a thin
 //! adapter that handles JsValue / serde / wasm-bindgen wiring.
 
+use crate::params::Chain;
 use crate::sapling::builder::TransactionResult;
 use crate::sapling::prover;
 use crate::sapling::sync::{HandleBlocksResult, ShieldBlock};
@@ -123,7 +124,7 @@ impl Fee {
     /// PIVX v1 (raw P2PKH) tx fee: for pure transparent → transparent.
     #[wasm_bindgen(js_name = transparentTx)]
     pub fn transparent_tx(inputs: u64, outputs: u64) -> u64 {
-        crate::fees::estimate_raw_transparent_fee(inputs as usize, outputs as usize)
+        crate::fees::estimate_raw_transparent_fee(Chain::Pivx, inputs as usize, outputs as usize)
     }
 }
 
@@ -181,14 +182,35 @@ impl Wallet {
     /// set the wallet's birthday for fast initial sync.
     #[wasm_bindgen(js_name = create)]
     pub fn create(current_height: u32) -> Result<Wallet, JsError> {
-        let inner = crate::wallet::create_new_wallet(current_height).map_err(js_err)?;
+        let inner = crate::wallet::create_new_wallet(Chain::Pivx, current_height).map_err(js_err)?;
+        Ok(Wallet { inner, locked: false })
+    }
+
+    /// As [`Wallet::create`], for a Litecoin wallet: transparent-only, no
+    /// shield or cold-staking support. Every `shield*`/`*ColdStake*` method
+    /// errs on the returned wallet; the transparent send/balance/signing
+    /// surface behaves the same as a PIVX wallet's, with Litecoin's own
+    /// coin type, address prefix, and message magic.
+    #[wasm_bindgen(js_name = createLitecoin)]
+    pub fn create_litecoin(current_height: u32) -> Result<Wallet, JsError> {
+        let inner =
+            crate::wallet::create_new_wallet(Chain::Litecoin, current_height).map_err(js_err)?;
         Ok(Wallet { inner, locked: false })
     }
 
     /// Import from an existing BIP39 mnemonic.
     #[wasm_bindgen(js_name = fromMnemonic)]
     pub fn from_mnemonic(mnemonic: &str, current_height: u32) -> Result<Wallet, JsError> {
-        let inner = crate::wallet::import_wallet(mnemonic, current_height).map_err(js_err)?;
+        let inner = crate::wallet::import_wallet(Chain::Pivx, mnemonic, current_height).map_err(js_err)?;
+        Ok(Wallet { inner, locked: false })
+    }
+
+    /// As [`Wallet::fromMnemonic`], for a Litecoin wallet; see
+    /// [`Wallet::createLitecoin`].
+    #[wasm_bindgen(js_name = fromMnemonicLitecoin)]
+    pub fn from_mnemonic_litecoin(mnemonic: &str, current_height: u32) -> Result<Wallet, JsError> {
+        let inner = crate::wallet::import_wallet(Chain::Litecoin, mnemonic, current_height)
+            .map_err(js_err)?;
         Ok(Wallet { inner, locked: false })
     }
 
@@ -263,6 +285,7 @@ impl Wallet {
     /// Seed + viewing key untouched.
     #[wasm_bindgen(js_name = resetToCheckpoint)]
     pub fn reset_to_checkpoint(&mut self) -> Result<(), JsError> {
+        self.ensure_pivx()?;
         crate::wallet::reset_to_checkpoint(&mut self.inner).map_err(js_err)
     }
 
@@ -270,6 +293,7 @@ impl Wallet {
 
     #[wasm_bindgen(js_name = shieldAddress)]
     pub fn shield_address(&self) -> Result<String, JsError> {
+        self.ensure_pivx()?;
         crate::keys::get_default_address(&self.inner.extfvk).map_err(js_err)
     }
 
@@ -284,6 +308,7 @@ impl Wallet {
     /// are derived.
     #[wasm_bindgen(js_name = shieldAddressAt)]
     pub fn shield_address_at(&self, start_index: u32) -> Result<JsValue, JsError> {
+        self.ensure_pivx()?;
         let (idx, addr) =
             crate::keys::shield_address_at(&self.inner.extfvk, start_index).map_err(js_err)?;
         // serde_wasm_bindgen returns a plain JS object `{ index, address }`.
@@ -326,11 +351,15 @@ impl Wallet {
     pub fn transparent_address_at(&self, change: u32, index: u32) -> Result<String, JsError> {
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
-        crate::keys::transparent_address_at(&bip39_seed, change, index).map_err(js_err)
+        crate::keys::transparent_address_at(self.inner.chain, &bip39_seed, change, index)
+            .map_err(js_err)
     }
 
     #[wasm_bindgen(js_name = shieldBalanceSat)]
     pub fn shield_balance_sat(&self) -> u64 {
+        if self.inner.chain != Chain::Pivx {
+            return 0;
+        }
         self.inner.get_balance()
     }
 
@@ -355,6 +384,9 @@ impl Wallet {
     /// by ordinary sends, which the network then rejects.
     #[wasm_bindgen(js_name = delegatedBalanceSat)]
     pub fn delegated_balance_sat(&self) -> u64 {
+        if self.inner.chain != Chain::Pivx {
+            return 0;
+        }
         self.inner.get_delegated_balance()
     }
 
@@ -416,10 +448,12 @@ impl Wallet {
     #[wasm_bindgen(js_name = maxSendableSat)]
     pub fn max_sendable_sat(&self, to_address: &str) -> u64 {
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
-        if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+        if self.inner.chain == Chain::Pivx
+            && to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
+        {
             crate::transparent::builder::max_shieldable_transparent(&self.inner)
         } else {
-            crate::transparent::builder::max_sendable_transparent(&self.inner, 1)
+            crate::transparent::builder::max_sendable_transparent(self.inner.chain, &self.inner, 1)
         }
     }
 
@@ -442,6 +476,9 @@ impl Wallet {
     /// which a UI can treat as "disable the control".
     #[wasm_bindgen(js_name = maxShieldSpendableSat)]
     pub fn max_shield_spendable_sat(&self, to_address: &str) -> u64 {
+        if self.inner.chain != Chain::Pivx {
+            return 0;
+        }
         crate::sapling::builder::max_shield_spendable(&self.inner, to_address)
     }
 
@@ -457,6 +494,9 @@ impl Wallet {
         transparent_count: u64,
         shield_count: u64,
     ) -> u64 {
+        if self.inner.chain != Chain::Pivx {
+            return 0;
+        }
         crate::sapling::builder::max_shield_spendable_to_many(
             &self.inner,
             transparent_count,
@@ -471,7 +511,11 @@ impl Wallet {
     /// this and each part clears the 5460 sat dust threshold.
     #[wasm_bindgen(js_name = maxSendableSatToMany)]
     pub fn max_sendable_sat_to_many(&self, recipient_count: usize) -> u64 {
-        crate::transparent::builder::max_sendable_transparent(&self.inner, recipient_count)
+        crate::transparent::builder::max_sendable_transparent(
+            self.inner.chain,
+            &self.inner,
+            recipient_count,
+        )
     }
 
     #[wasm_bindgen(js_name = lastBlock)]
@@ -488,6 +532,9 @@ impl Wallet {
     /// who want a live read should re-call after sync.
     #[wasm_bindgen(js_name = notes)]
     pub fn notes(&self) -> NotesOut {
+        if self.inner.chain != Chain::Pivx {
+            return NotesOut { notes: vec![] };
+        }
         NotesOut {
             notes: self.inner.unspent_notes.clone(),
         }
@@ -517,6 +564,7 @@ impl Wallet {
         &mut self,
         blocks: ShieldBlocksInput,
     ) -> Result<HandleBlocksResult, JsError> {
+        self.ensure_pivx()?;
         // Skips blocks at or below `lastBlock()` and advances the cursor, so
         // re-applying a range is a no-op rather than a silent corruption of
         // every witness position. See `apply_blocks_to_wallet`.
@@ -542,8 +590,9 @@ impl Wallet {
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         let (_addr, _pk, privkey) =
-            crate::keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0).map_err(js_err)?;
-        crate::messages::sign_message(&privkey, message).map_err(js_err)
+            crate::keys::transparent_key_from_bip39_seed(self.inner.chain, &bip39_seed, 0, 0)
+                .map_err(js_err)?;
+        crate::messages::sign_message(self.inner.chain, &privkey, message).map_err(js_err)
     }
 
     // ─── Tx building ────────────────────────────────────────────
@@ -556,6 +605,7 @@ impl Wallet {
         opts: SendShieldOpts,
         params: &SaplingParams,
     ) -> Result<TransactionResult, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         crate::sapling::builder::create_shield_transaction(
             &mut self.inner,
@@ -592,6 +642,7 @@ impl Wallet {
         block_height: u32,
         params: &SaplingParams,
     ) -> Result<TransactionResult, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         crate::sapling::builder::create_shield_transaction_to_many(
             &mut self.inner,
@@ -612,6 +663,7 @@ impl Wallet {
         &self,
         recipients: ShieldRecipientsInput,
     ) -> Result<u64, JsError> {
+        self.ensure_pivx()?;
         let (t_outs, s_outs, total) =
             crate::sapling::builder::shield_recipient_fee_shape(&recipients.recipients)
                 .map_err(js_err)?;
@@ -644,6 +696,7 @@ impl Wallet {
         staking_address: &str,
         amount_sat: u64,
     ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::coldstake::create_delegation_transaction(
@@ -669,6 +722,7 @@ impl Wallet {
         staking_address: &str,
         amount_sat: u64,
     ) -> Result<u64, JsError> {
+        self.ensure_pivx()?;
         crate::transparent::coldstake::estimate_delegation_fee(
             &self.inner,
             staking_address,
@@ -697,6 +751,7 @@ impl Wallet {
     /// slots.
     #[wasm_bindgen(js_name = stakingAddressAt)]
     pub fn staking_address_at(&self, change: u32, index: u32) -> Result<String, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         let hash = crate::transparent::coldstake::owner_hash_from_seed(&bip39_seed, change, index)
@@ -738,6 +793,7 @@ impl Wallet {
         to_address: &str,
         amount_sat: u64,
     ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::coldstake::create_coldstake_withdrawal(
@@ -779,6 +835,7 @@ impl Wallet {
         amount_sat: u64,
         change_staking_address: &str,
     ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_pivx()?;
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::coldstake::create_coldstake_withdrawal_with_change(
@@ -839,13 +896,16 @@ impl Wallet {
     ) -> Result<TransparentTransactionResult, JsError> {
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         self.ensure_unlocked()?;
-        if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+        if self.inner.chain == Chain::Pivx
+            && to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
+        {
             return Err(JsError::new(
                 "to_address is a shield address: use sendTransparentToShield instead",
             ));
         }
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::builder::create_raw_transparent_transaction(
+            self.inner.chain,
             &mut self.inner,
             &bip39_seed,
             to_address,
@@ -881,6 +941,7 @@ impl Wallet {
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::builder::create_raw_transparent_transaction_to_many(
+            self.inner.chain,
             &mut self.inner,
             &bip39_seed,
             &recipients.recipients,
@@ -904,6 +965,7 @@ impl Wallet {
         recipients: RecipientsInput,
     ) -> Result<u64, JsError> {
         crate::transparent::builder::estimate_raw_transparent_fee_to_many(
+            self.inner.chain,
             &self.inner,
             &recipients.recipients,
         )
@@ -928,6 +990,7 @@ impl Wallet {
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::builder::create_raw_transparent_transaction_from_utxos_to_many(
+            self.inner.chain,
             &bip39_seed,
             from_change,
             from_index,
@@ -963,6 +1026,7 @@ impl Wallet {
         self.ensure_unlocked()?;
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::builder::create_raw_transparent_transaction_from_utxos(
+            self.inner.chain,
             &bip39_seed,
             from_change,
             from_index,
@@ -984,6 +1048,7 @@ impl Wallet {
         block_height: u32,
         params: &SaplingParams,
     ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_pivx()?;
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         self.ensure_unlocked()?;
         if !to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
@@ -993,6 +1058,7 @@ impl Wallet {
         }
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         crate::transparent::builder::create_raw_transparent_transaction(
+            self.inner.chain,
             &mut self.inner,
             &bip39_seed,
             to_address,
@@ -1018,6 +1084,7 @@ impl Wallet {
         to_address: &str,
         amount_sat: u64,
     ) -> Result<u64, JsError> {
+        self.ensure_pivx()?;
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         let dest_is_shield =
             to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
@@ -1047,8 +1114,8 @@ impl Wallet {
         amount_sat: u64,
     ) -> Result<u64, JsError> {
         use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
-        let dest_is_shield =
-            to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
+        let dest_is_shield = self.inner.chain == Chain::Pivx
+            && to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
         // Same filter the builders select on (see
         // `transparent::builder::select_transparent_utxos`). Estimating over
         // the unfiltered set quotes a fee for coins no builder will reach for,
@@ -1076,7 +1143,7 @@ impl Wallet {
                 crate::fees::estimate_fee(n, 0, 0, 2)
             } else {
                 // v1 P2PKH: N inputs, dest + change
-                crate::fees::estimate_raw_transparent_fee(n as usize, 2)
+                crate::fees::estimate_raw_transparent_fee(self.inner.chain, n as usize, 2)
             };
             if total >= amount_sat.saturating_add(fee) {
                 return Ok(fee);
@@ -1094,6 +1161,9 @@ impl Wallet {
     /// built externally (i.e. without going through `sendShield`).
     #[wasm_bindgen(js_name = finalizeShieldSpend)]
     pub fn finalize_shield_spend(&mut self, nullifiers: Vec<String>) {
+        if self.inner.chain != Chain::Pivx {
+            return;
+        }
         self.inner.finalize_transaction(&nullifiers);
     }
 
@@ -1111,6 +1181,18 @@ impl Wallet {
         if self.locked {
             return Err(JsError::new(
                 "wallet is locked: call unlock(key) first",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Guard for the methods that only make sense on PIVX: Sapling shielding
+    /// and P2CS cold-staking have no Litecoin equivalent.
+    fn ensure_pivx(&self) -> Result<(), JsError> {
+        if self.inner.chain != Chain::Pivx {
+            return Err(JsError::new(
+                "not supported on a Litecoin wallet: this method is PIVX-only \
+                 (Sapling shielding and cold-staking have no Litecoin equivalent)",
             ));
         }
         Ok(())
@@ -1221,7 +1303,19 @@ pub fn verify_message(
     message: &str,
     signature_b64: &str,
 ) -> Result<bool, JsError> {
-    crate::messages::verify_message(address, message, signature_b64).map_err(js_err)
+    crate::messages::verify_message(Chain::Pivx, address, message, signature_b64).map_err(js_err)
+}
+
+/// As [`verify_message`], for a Litecoin Core-format signature (different
+/// magic string, different recovered-address prefix).
+#[wasm_bindgen(js_name = verifyMessageLitecoin)]
+pub fn verify_message_litecoin(
+    address: &str,
+    message: &str,
+    signature_b64: &str,
+) -> Result<bool, JsError> {
+    crate::messages::verify_message(Chain::Litecoin, address, message, signature_b64)
+        .map_err(js_err)
 }
 
 /// Parse a PIV amount string (e.g. `"1.23456789"`) into satoshis.

@@ -18,6 +18,7 @@
 //! deliberately asymmetric (delegate at `0/0` only, withdraw from anywhere) and
 //! rotation is what first makes that reachable.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
@@ -41,7 +42,7 @@ fn seed() -> Vec<u8> {
 }
 
 fn address_at(change: u32, index: u32) -> String {
-    keys::transparent_address_at(&seed(), change, index).unwrap()
+    keys::transparent_address_at(Chain::Pivx, &seed(), change, index).unwrap()
 }
 
 /// An output with no slot tag: what every consumer written before the field
@@ -72,7 +73,7 @@ fn at_slot_with_script(
     change: u32,
     index: u32,
 ) -> SerializedUTXO {
-    let script = keys::address_to_p2pkh_script(&address_at(change, index)).unwrap();
+    let script = keys::address_to_p2pkh_script(Chain::Pivx, &address_at(change, index)).unwrap();
     SerializedUTXO {
         script: simd::hex::bytes_to_hex_string(&script),
         ..at_slot(letter, vout, amount, change, index)
@@ -80,13 +81,13 @@ fn at_slot_with_script(
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    keys::pubkey_to_pivx_address(&[0x02; 33])
+    keys::pubkey_to_address(Chain::Pivx, &[0x02; 33])
 }
 
 fn one(address: &str, amount: u64) -> Vec<Recipient> {
@@ -99,7 +100,7 @@ fn one(address: &str, amount: u64) -> Vec<Recipient> {
 
 #[test]
 fn slot_zero_matches_the_default_transparent_address() {
-    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     assert_eq!(
         address_at(0, 0),
         w.get_transparent_address().unwrap(),
@@ -128,7 +129,7 @@ fn rotated_addresses_are_valid_p2pkh_and_derivation_is_stable() {
         let addr = address_at(0, index);
         assert!(addr.starts_with('D'), "slot 0/{index} produced {addr}, not a D... address");
         // Round-trips through the same validation an outgoing payment gets.
-        keys::address_to_p2pkh_script(&addr)
+        keys::address_to_p2pkh_script(Chain::Pivx, &addr)
             .unwrap_or_else(|e| panic!("slot 0/{index} produced an unpayable address: {e}"));
         assert_eq!(addr, address_at(0, index), "derivation is not deterministic");
     }
@@ -140,7 +141,7 @@ fn a_child_number_past_the_non_hardened_ceiling_says_so() {
     // above 2^31-1. A monotonic invoice counter is the only thing that reaches
     // it, and the underlying crate's "invalid child number" reads as a kit bug.
     for (change, index) in [(0u32, 0x8000_0000u32), (0x8000_0000, 0), (0, u32::MAX)] {
-        let err = keys::transparent_address_at(&seed(), change, index)
+        let err = keys::transparent_address_at(Chain::Pivx, &seed(), change, index)
             .unwrap_err()
             .to_string();
         assert!(
@@ -182,7 +183,7 @@ fn untagged_utxos_are_still_selectable_and_spendable() {
     assert_eq!(w.get_rotated_balance(), 0, "nothing is tagged, so nothing is rotated");
 
     let result =
-        create_raw_transparent_transaction_to_many(&mut w, &seed(), &one(&to_address(), 100_000))
+        create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &one(&to_address(), 100_000))
             .unwrap();
     let tx = common::decode(&simd::hex::hex_string_to_bytes(&result.txhex));
     common::verify_all_signatures(&tx);
@@ -194,7 +195,7 @@ fn an_untagged_utxo_can_be_spent_from_any_slot() {
     // rejecting untagged inputs would break every consumer that rotates today
     // by tracking slots outside the kit.
     for (change, index) in [(0u32, 0u32), (0, 5), (1, 9)] {
-        let result = create_raw_transparent_transaction_from_utxos(
+        let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
             &seed(),
             change,
             index,
@@ -246,7 +247,7 @@ fn the_wallet_state_builder_never_selects_a_rotated_utxo() {
     let mut w = wallet_with(vec![at_slot("b", 0, 700_000, 0, 5), untagged("a", 0, 500_000)]);
 
     let result =
-        create_raw_transparent_transaction_to_many(&mut w, &seed(), &one(&to_address(), 100_000))
+        create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &one(&to_address(), 100_000))
             .unwrap();
     assert_eq!(result.spent.len(), 1, "selection reached past the untagged output");
     assert_eq!(
@@ -262,7 +263,7 @@ fn the_wallet_state_builder_never_selects_a_rotated_utxo() {
 #[test]
 fn a_send_larger_than_the_default_slot_holds_fails_and_says_where_the_rest_is() {
     let mut w = wallet_with(vec![untagged("a", 0, 200_000), at_slot("b", 0, 900_000, 0, 5)]);
-    let err = create_raw_transparent_transaction_to_many(
+    let err = create_raw_transparent_transaction_to_many(Chain::Pivx, 
         &mut w,
         &seed(),
         &one(&to_address(), 800_000),
@@ -281,7 +282,7 @@ fn a_send_larger_than_the_default_slot_holds_fails_and_says_where_the_rest_is() 
 #[test]
 fn a_wallet_holding_only_rotated_coins_reports_why_it_cannot_send() {
     let mut w = wallet_with(vec![at_slot("b", 0, 900_000, 0, 5)]);
-    let err = create_raw_transparent_transaction_to_many(
+    let err = create_raw_transparent_transaction_to_many(Chain::Pivx, 
         &mut w,
         &seed(),
         &one(&to_address(), 100_000),
@@ -301,13 +302,13 @@ fn the_estimator_and_max_sendable_agree_with_the_builder() {
     // one the builder will honour. A rotated output that inflated either would
     // offer coins the send then refuses.
     let w = wallet_with(vec![untagged("a", 0, 500_000), at_slot("b", 0, 9_000_000, 0, 5)]);
-    let max = max_sendable_transparent(&w, 1);
+    let max = max_sendable_transparent(Chain::Pivx, &w, 1);
     assert!(max > 0 && max < 500_000, "max sendable {max} was computed over rotated coins");
 
     let mut w2 = wallet_with(w.unspent_utxos.clone());
-    let fee = estimate_raw_transparent_fee_to_many(&w, &one(&to_address(), max)).unwrap();
+    let fee = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &one(&to_address(), max)).unwrap();
     let result =
-        create_raw_transparent_transaction_to_many(&mut w2, &seed(), &one(&to_address(), max))
+        create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w2, &seed(), &one(&to_address(), max))
             .unwrap();
     assert_eq!(result.fee, fee, "estimator and builder disagree once rotated coins exist");
     assert_eq!(result.spent.len(), 1);
@@ -341,7 +342,7 @@ fn delegation_cannot_be_funded_from_a_rotated_utxo() {
 
 #[test]
 fn spending_from_the_matching_slot_produces_a_valid_transaction() {
-    let result = create_raw_transparent_transaction_from_utxos(
+    let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -356,7 +357,7 @@ fn spending_from_the_matching_slot_produces_a_valid_transaction() {
 
     // Change returns to the source address, keeping the slot's funds at the
     // slot rather than quietly consolidating them onto 0/0.
-    let change_script = keys::address_to_p2pkh_script(&address_at(0, 5)).unwrap();
+    let change_script = keys::address_to_p2pkh_script(Chain::Pivx, &address_at(0, 5)).unwrap();
     assert!(
         tx.outputs.iter().any(|o| o.script_pubkey == change_script),
         "change did not return to the slot it came from"
@@ -365,7 +366,7 @@ fn spending_from_the_matching_slot_produces_a_valid_transaction() {
 
 #[test]
 fn a_tagged_utxo_from_another_slot_is_rejected() {
-    let err = create_raw_transparent_transaction_from_utxos(
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -386,7 +387,7 @@ fn a_tagged_utxo_from_another_slot_is_rejected() {
 fn a_mixed_slot_input_set_is_rejected_rather_than_signed() {
     // One key signs every input, so a set spanning two slots can only ever
     // produce a transaction the network rejects.
-    let err = create_raw_transparent_transaction_from_utxos_to_many(
+    let err = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -407,7 +408,7 @@ fn a_mistagged_utxo_is_caught_by_its_script() {
     let mut utxo = at_slot_with_script("b", 0, 500_000, 0, 9);
     utxo.hd_slot = Some(HdSlot { change: 0, index: 5 });
 
-    let err = create_raw_transparent_transaction_from_utxos(
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -428,13 +429,13 @@ fn a_mistagged_utxo_is_caught_by_its_script() {
 fn an_untagged_utxo_with_a_foreign_script_is_still_caught() {
     // No tag at all, so only the script can catch this. A consumer who joins
     // scripts on for cold staking gets the check for free on ordinary sends.
-    let script = keys::address_to_p2pkh_script(&address_at(0, 9)).unwrap();
+    let script = keys::address_to_p2pkh_script(Chain::Pivx, &address_at(0, 9)).unwrap();
     let utxo = SerializedUTXO {
         script: simd::hex::bytes_to_hex_string(&script),
         ..untagged("b", 0, 500_000)
     };
 
-    let err = create_raw_transparent_transaction_from_utxos(
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -453,7 +454,7 @@ fn a_matching_script_passes_untouched() {
     // The mirror of the above: the same check must not fire on the correct
     // script, or cold-staking consumers (who always populate it) lose ordinary
     // sends entirely.
-    let result = create_raw_transparent_transaction_from_utxos(
+    let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         1,
         3,
@@ -479,7 +480,7 @@ fn a_p2cs_script_is_still_reported_as_delegated_not_as_a_slot_mismatch() {
         ..at_slot("b", 0, 500_000, 0, 5)
     };
 
-    let err = create_raw_transparent_transaction_from_utxos(
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &seed(),
         0,
         5,
@@ -675,7 +676,7 @@ fn withdrawing_from_a_rotated_owner_returns_change_to_that_slot() {
     .unwrap();
 
     let tx = common::decode(&simd::hex::hex_string_to_bytes(&result.txhex));
-    let change_script = keys::address_to_p2pkh_script(&address_at(0, 5)).unwrap();
+    let change_script = keys::address_to_p2pkh_script(Chain::Pivx, &address_at(0, 5)).unwrap();
     assert!(
         tx.outputs.iter().any(|o| o.script_pubkey == change_script),
         "change did not return to the owner slot it was withdrawn from"
@@ -683,7 +684,7 @@ fn withdrawing_from_a_rotated_owner_returns_change_to_that_slot() {
     assert!(
         !tx.outputs
             .iter()
-            .any(|o| o.script_pubkey == keys::address_to_p2pkh_script(&address_at(0, 0)).unwrap()),
+            .any(|o| o.script_pubkey == keys::address_to_p2pkh_script(Chain::Pivx, &address_at(0, 0)).unwrap()),
         "change leaked to slot 0/0, which is not where this delegation lived"
     );
 }

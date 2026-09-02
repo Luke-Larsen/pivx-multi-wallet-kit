@@ -13,6 +13,7 @@
 //! high is the failure that matters, since it offers an amount that is then
 //! refused. Erring low only leaves dust behind.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::sapling::builder::{
     ShieldRecipient, max_shield_spendable, max_shield_spendable_to_many, select_shield_notes,
@@ -34,17 +35,17 @@ fn note(value: u64) -> SerializedNote {
 }
 
 fn wallet_with(notes: Vec<SerializedNote>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_notes = notes;
     w
 }
 
 fn t_address() -> String {
-    keys::pubkey_to_pivx_address(&[0x02; 33])
+    keys::pubkey_to_address(Chain::Pivx, &[0x02; 33])
 }
 
 fn shield_address() -> String {
-    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     keys::get_default_address(&w.extfvk).unwrap()
 }
 

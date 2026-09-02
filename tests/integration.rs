@@ -8,6 +8,7 @@
 //! and (where applicable) the full shield handling pipeline without needing
 //! network access at test time.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::*;
 
 const TX_TRANSPARENT_HEX: &str = include_str!("fixtures/tx_transparent.hex");
@@ -87,7 +88,7 @@ const TEST_MNEMONIC: &str =
 
 #[test]
 fn derive_transparent_address_from_mnemonic() {
-    let addr = keys::get_transparent_address(TEST_MNEMONIC).expect("derive transparent addr");
+    let addr = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).expect("derive transparent addr");
     assert!(
         addr.starts_with('D'),
         "PIVX transparent address should start with 'D', got: {}",
@@ -95,7 +96,7 @@ fn derive_transparent_address_from_mnemonic() {
     );
     assert_eq!(addr.len(), 34, "PIVX address should be 34 chars, got: {}", addr.len());
     // Deterministic: derive twice, expect identical.
-    let addr2 = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let addr2 = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
     assert_eq!(addr, addr2);
 }
 
@@ -192,8 +193,8 @@ fn shield_address_at_produces_unique_addresses_across_a_range() {
 
 #[test]
 fn decode_transparent_address_roundtrips_to_script() {
-    let addr = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
-    let script = keys::address_to_p2pkh_script(&addr).unwrap();
+    let addr = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
+    let script = keys::address_to_p2pkh_script(Chain::Pivx, &addr).unwrap();
     // P2PKH: OP_DUP OP_HASH160 0x14 <20-byte-hash> OP_EQUALVERIFY OP_CHECKSIG = 25 bytes.
     assert_eq!(script.len(), 25);
     assert_eq!(script[0], 0x76);
@@ -209,8 +210,8 @@ fn decode_transparent_address_roundtrips_to_script() {
 
 #[test]
 fn wallet_create_import_match() {
-    let created = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
-    let reimported = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let created = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
+    let reimported = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     assert_eq!(created.extfvk, reimported.extfvk);
     assert_eq!(created.birthday_height, reimported.birthday_height);
     assert_eq!(created.last_block, reimported.last_block);
@@ -228,7 +229,7 @@ fn wallet_crypt_roundtrip() {
 
 #[test]
 fn wallet_encrypt_decrypt_secrets_roundtrip() {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let original_mnemonic = w.get_mnemonic().to_string();
     let original_extfvk = w.extfvk.clone();
 
@@ -244,7 +245,7 @@ fn wallet_encrypt_decrypt_secrets_roundtrip() {
 
 #[test]
 fn wallet_decrypt_wrong_key_fails() {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let key = [0xA5u8; 32];
     wallet::encrypt_secrets(&mut w, &key).unwrap();
 
@@ -257,7 +258,7 @@ fn wallet_decrypt_wrong_key_fails() {
 /// caller can retry with a different key without reloading from disk.
 #[test]
 fn wallet_decrypt_wrong_key_does_not_corrupt_state() {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let key = [0xA5u8; 32];
     wallet::encrypt_secrets(&mut w, &key).unwrap();
 
@@ -279,7 +280,7 @@ fn wallet_decrypt_wrong_key_does_not_corrupt_state() {
 /// Catches regressions like a JSON roundtrip dropping the 32-byte seed.
 #[test]
 fn wallet_disk_roundtrip_preserves_decryption() {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let original_extfvk = w.extfvk.clone();
     let key = [0x12u8; 32];
 
@@ -298,7 +299,7 @@ fn wallet_disk_roundtrip_preserves_decryption() {
 /// to unzeroized buffers).
 #[test]
 fn wallet_serialize_encrypted_roundtrip() {
-    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let original_extfvk = w.extfvk.clone();
     let key = [0x77u8; 32];
 
@@ -318,7 +319,7 @@ fn wallet_serialize_encrypted_roundtrip() {
 
 #[test]
 fn clone_for_encryption_is_independent() {
-    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let mut clone = w.clone_for_encryption();
     let key = [0x33u8; 32];
     wallet::encrypt_secrets(&mut clone, &key).unwrap();
@@ -331,7 +332,7 @@ fn clone_for_encryption_is_independent() {
 
 #[test]
 fn wallet_reset_to_checkpoint_clears_state() {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_notes.push(wallet::SerializedNote {
         note: serde_json::json!({"value": 1000}),
         witness: "00".into(),
@@ -651,8 +652,8 @@ fn fee_estimation_scales_with_sapling_io() {
 
 #[test]
 fn raw_transparent_fee_is_sane() {
-    let one_in = fees::estimate_raw_transparent_fee(1, 2);
-    let two_in = fees::estimate_raw_transparent_fee(2, 2);
+    let one_in = fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2);
+    let two_in = fees::estimate_raw_transparent_fee(Chain::Pivx, 2, 2);
     assert!(two_in > one_in);
     // Should be in a reasonable sat range (well under 1 PIV).
     assert!(one_in < 100_000_000);
@@ -722,7 +723,7 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
 
     // Derive a random extfvk from a throwaway mnemonic: guaranteed not to be
     // the actual recipient of this tx.
-    let random = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let random = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
 
     // Start with the empty tree (just to exercise the path: the real tree
     // would be one from just before this tx's block).
@@ -764,7 +765,7 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
     // the spend nullifier and advance the tree by the change output.
     let tx_bytes = decode_fixture(TX_TRANSPARENT_HEX);
 
-    let random = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let random = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     let tree_hex = checkpoints::MAINNET_CHECKPOINTS[0].1;
     let block = sapling::sync::ShieldBlock {
         height: 5_000_000,
@@ -798,7 +799,7 @@ fn transparent_to_transparent_tx_needs_no_prover() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let bip39_seed = mnemonic.to_seed("");
 
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos.push(SerializedUTXO {
         // A fake but well-formed 64-char txid.
         txid: "a".repeat(64),
@@ -813,7 +814,7 @@ fn transparent_to_transparent_tx_needs_no_prover() {
     // be a `D...` address, triggering the raw v1 path.
     let dest = w.get_transparent_address().unwrap();
 
-    let result = create_raw_transparent_transaction(
+    let result = create_raw_transparent_transaction(Chain::Pivx, 
         &mut w,
         &bip39_seed,
         &dest,
@@ -846,7 +847,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
     // Derive the address at HD index 5: what a consumer that maintains
     // multiple receive addresses would use as a source.
     let (from_addr, _pubkey, _privkey) =
-        keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap();
+        keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 5).unwrap();
 
     // UTXOs at from_addr.
     let utxos = vec![SerializedUTXO {
@@ -860,9 +861,9 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
 
     // Send 0.5 PIV to a different address; the rest is fee + change
     // back to from_addr.
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
-    let result = create_raw_transparent_transaction_from_utxos(
+    let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &bip39_seed,
         0,
         5,
@@ -881,7 +882,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
     // The signed tx should reference from_addr's script in the change
     // output. We can confirm this without parsing the tx by checking that
     // the from_addr script bytes appear somewhere in the body.
-    let from_script = keys::address_to_p2pkh_script(&from_addr).unwrap();
+    let from_script = keys::address_to_p2pkh_script(Chain::Pivx, &from_addr).unwrap();
     let tx_bytes = simd::hex::hex_string_to_bytes(&result.txhex);
     assert!(
         windows_contains(&tx_bytes, &from_script),
@@ -905,9 +906,9 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         height: 5_000_000,
         ..Default::default()
     }];
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
 
-    let result = create_raw_transparent_transaction_from_utxos(
+    let result = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &bip39_seed,
         0,
         3,
@@ -915,7 +916,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         &to,
         // Pass total - fee so change is exactly 0: the typical
         // "send everything" path.
-        100_000_000 - pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2),
+        100_000_000 - pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2),
     )
     .unwrap();
 
@@ -925,7 +926,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
     assert_eq!(result.spent.len(), 1);
     assert_eq!(
         result.fee,
-        pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2)
+        pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, 1, 2)
     );
 }
 
@@ -936,8 +937,8 @@ fn raw_transparent_from_utxos_empty_utxos_fails() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let bip39_seed = mnemonic.to_seed("");
 
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
-    let err = create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 0, &[], &to, 100);
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, &bip39_seed, 0, 0, &[], &to, 100);
     assert!(err.is_err());
 }
 
@@ -957,8 +958,8 @@ fn raw_transparent_from_utxos_insufficient_balance_fails() {
         height: 5_000_000,
         ..Default::default()
     }];
-    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
-    let err = create_raw_transparent_transaction_from_utxos(
+    let to = keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap();
+    let err = create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
         &bip39_seed,
         0,
         1,
@@ -987,7 +988,7 @@ fn transparent_to_shield_requires_prover() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let bip39_seed = mnemonic.to_seed("");
 
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos.push(SerializedUTXO {
         txid: "a".repeat(64),
         vout: 0,
@@ -1005,7 +1006,7 @@ fn transparent_to_shield_requires_prover() {
     let extfvk = keys::full_viewing_key(&extsk);
     let shield_dest = keys::get_default_address(&keys::encode_extfvk(&extfvk)).unwrap();
 
-    let err = create_raw_transparent_transaction(
+    let err = create_raw_transparent_transaction(Chain::Pivx, 
         &mut w,
         &bip39_seed,
         &shield_dest,
@@ -1113,7 +1114,7 @@ fn apply_blocks_sequence_filters_spent_own_notes() {
     use pivx_wallet_kit::wallet::SerializedNote;
 
     let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let mut w = pivx_wallet_kit::wallet::import_wallet(mnemonic, 1).unwrap();
+    let mut w = pivx_wallet_kit::wallet::import_wallet(Chain::Pivx, mnemonic, 1).unwrap();
 
     // Three synthetic notes: A (existing, will be spent), B (existing,
     // survives), C (newly discovered AND spent in same batch).
@@ -1160,7 +1161,7 @@ fn apply_blocks_sequence_filters_spent_own_notes() {
 #[test]
 fn apply_blocks_error_path_preserves_state() {
     let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let mut w = pivx_wallet_kit::wallet::import_wallet(mnemonic, 1).unwrap();
+    let mut w = pivx_wallet_kit::wallet::import_wallet(Chain::Pivx, mnemonic, 1).unwrap();
 
     // Stash a sentinel note so we can detect any state mutation.
     w.unspent_notes = vec![pivx_wallet_kit::wallet::SerializedNote {

@@ -6,6 +6,7 @@
 //! `select_transparent_utxos` for that reason, and these tests pin the
 //! agreement rather than trusting it.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::transparent::builder::{
     Recipient, create_raw_transparent_transaction_to_many, estimate_raw_transparent_fee_to_many,
 };
@@ -15,7 +16,7 @@ const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
@@ -39,7 +40,7 @@ fn seed() -> Vec<u8> {
 }
 
 fn payee(index: u32) -> String {
-    pivx_wallet_kit::keys::transparent_key_from_bip39_seed(&seed(), 0, 100 + index)
+    pivx_wallet_kit::keys::transparent_key_from_bip39_seed(Chain::Pivx, &seed(), 0, 100 + index)
         .unwrap()
         .0
 }
@@ -62,12 +63,12 @@ fn estimate_matches_what_the_builder_charges() {
             let rs = recipients(n, 1_000_000);
 
             let mut w = wallet_with(utxos);
-            let quoted = match estimate_raw_transparent_fee_to_many(&w, &rs) {
+            let quoted = match estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &rs) {
                 Ok(f) => f,
                 Err(_) => continue, // insufficient funds for this shape
             };
             let built =
-                create_raw_transparent_transaction_to_many(&mut w, &seed(), &rs).unwrap();
+                create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &rs).unwrap();
 
             assert_eq!(
                 quoted, built.fee,
@@ -88,9 +89,9 @@ fn estimate_grows_when_selection_needs_more_inputs() {
         utxo("c", 2, 10_000_000),
     ]);
 
-    let one_input = estimate_raw_transparent_fee_to_many(&w, &recipients(1, 5_000_000)).unwrap();
-    let two_inputs = estimate_raw_transparent_fee_to_many(&w, &recipients(1, 15_000_000)).unwrap();
-    let three_inputs = estimate_raw_transparent_fee_to_many(&w, &recipients(1, 25_000_000)).unwrap();
+    let one_input = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(1, 5_000_000)).unwrap();
+    let two_inputs = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(1, 15_000_000)).unwrap();
+    let three_inputs = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(1, 25_000_000)).unwrap();
 
     assert!(
         one_input < two_inputs && two_inputs < three_inputs,
@@ -104,7 +105,7 @@ fn estimate_is_monotonic_in_recipient_count() {
     let w = wallet_with(vec![utxo("a", 0, 10_000_000_000)]);
     let mut previous = 0u64;
     for n in 1..=20u32 {
-        let fee = estimate_raw_transparent_fee_to_many(&w, &recipients(n, 1_000_000)).unwrap();
+        let fee = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(n, 1_000_000)).unwrap();
         assert!(fee > previous, "fee did not grow from {} to {n} recipients", n - 1);
         previous = fee;
     }
@@ -151,8 +152,8 @@ fn estimate_rejects_everything_the_builder_rejects() {
 
     for (name, rs, utxos) in cases {
         let mut w = wallet_with(utxos);
-        let estimate_err = estimate_raw_transparent_fee_to_many(&w, &rs).is_err();
-        let build_err = create_raw_transparent_transaction_to_many(&mut w, &seed(), &rs).is_err();
+        let estimate_err = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &rs).is_err();
+        let build_err = create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &rs).is_err();
 
         assert!(estimate_err, "{name}: estimator accepted it");
         assert!(build_err, "{name}: builder accepted it");
@@ -172,7 +173,7 @@ fn estimating_does_not_disturb_the_wallet() {
     let utxos_before = w.unspent_utxos.len();
 
     for n in 1..=5u32 {
-        let _ = estimate_raw_transparent_fee_to_many(&w, &recipients(n, 1_000_000));
+        let _ = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(n, 1_000_000));
     }
 
     assert_eq!(w.get_transparent_balance(), before);

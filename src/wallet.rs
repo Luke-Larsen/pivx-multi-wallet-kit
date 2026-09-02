@@ -7,6 +7,7 @@
 
 use crate::checkpoints;
 use crate::keys;
+use crate::params::Chain;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -374,6 +375,14 @@ pub fn parse_blockbook_utxos_at(
 pub struct WalletData {
     #[zeroize(skip)]
     pub version: u32,
+    /// Which chain this wallet's addresses/transactions are for.
+    ///
+    /// `#[serde(default)]` so a wallet serialized before this field existed
+    /// deserializes as [`Chain::Pivx`] (the only chain that existed then),
+    /// with no migration step required.
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub chain: Chain,
     /// 32-byte seed. Encrypt before persisting (never output unencrypted).
     pub(crate) seed: [u8; 32],
     /// Encoded extended full viewing key (not secret).
@@ -540,7 +549,7 @@ impl WalletData {
 
     /// Get the default transparent address (derived from the mnemonic).
     pub fn get_transparent_address(&self) -> Result<String, Box<dyn Error>> {
-        keys::get_transparent_address(&self.mnemonic)
+        keys::get_transparent_address(self.chain, &self.mnemonic)
     }
 
     /// Get the full 64-byte BIP39 seed (needed for transparent key derivation).
@@ -581,6 +590,7 @@ impl WalletData {
     pub fn clone_for_encryption(&self) -> Self {
         WalletData {
             version: self.version,
+            chain: self.chain,
             seed: self.seed,
             extfvk: self.extfvk.clone(),
             birthday_height: self.birthday_height,
@@ -603,13 +613,14 @@ impl WalletData {
 /// Create a brand-new wallet with a freshly generated 24-word BIP39 mnemonic.
 ///
 /// `current_height` is used to pick the closest embedded checkpoint as the
-/// wallet birthday; callers fetch it from their chosen RPC source.
-pub fn create_new_wallet(current_height: u32) -> Result<WalletData, Box<dyn Error>> {
+/// wallet birthday (PIVX only; see [`create_wallet_from_mnemonic`]); callers
+/// fetch it from their chosen RPC source.
+pub fn create_new_wallet(chain: Chain, current_height: u32) -> Result<WalletData, Box<dyn Error>> {
     let mut entropy = [0u8; 32];
     rand_core::OsRng.fill_bytes(&mut entropy);
     let mnemonic = bip39::Mnemonic::from_entropy(&entropy)?;
     entropy.zeroize();
-    create_wallet_from_mnemonic(&mnemonic.to_string(), current_height)
+    create_wallet_from_mnemonic(chain, &mnemonic.to_string(), current_height)
 }
 
 /// Import a wallet from an existing BIP39 mnemonic phrase.
@@ -617,15 +628,17 @@ pub fn create_new_wallet(current_height: u32) -> Result<WalletData, Box<dyn Erro
 /// `current_height` is used to choose the birthday checkpoint; see
 /// [`create_new_wallet`].
 pub fn import_wallet(
+    chain: Chain,
     mnemonic_str: &str,
     current_height: u32,
 ) -> Result<WalletData, Box<dyn Error>> {
     let _ = bip39::Mnemonic::parse_normalized(mnemonic_str)
         .map_err(|e| format!("Invalid mnemonic: {}", e))?;
-    create_wallet_from_mnemonic(mnemonic_str, current_height)
+    create_wallet_from_mnemonic(chain, mnemonic_str, current_height)
 }
 
 fn create_wallet_from_mnemonic(
+    chain: Chain,
     mnemonic_str: &str,
     current_height: u32,
 ) -> Result<WalletData, Box<dyn Error>> {
@@ -637,19 +650,35 @@ fn create_wallet_from_mnemonic(
     seed.copy_from_slice(&bip39_seed[..32]);
     bip39_seed.zeroize();
 
+    // Sapling has no Litecoin equivalent, but deriving the key anyway costs
+    // nothing and keeps `WalletData`'s shape uniform across chains; it is
+    // simply never surfaced (the wasm `shieldAddress`-family methods refuse
+    // to run on a non-PIVX wallet).
     let extsk = keys::spending_key_from_seed(&seed, 0)?;
     let extfvk = keys::full_viewing_key(&extsk);
 
-    let (checkpoint_height, commitment_tree) =
-        checkpoints::get_checkpoint(current_height as i32);
+    // `checkpoints::get_checkpoint` searches a PIVX-mainnet-only height
+    // table; feeding it a Litecoin height would silently stamp
+    // `birthday_height`/`last_block` with an unrelated PIVX-derived value
+    // (or the earliest PIVX checkpoint, on no match) instead of the real
+    // height the caller passed in. A non-PIVX wallet has no checkpoint fast
+    // sync to begin with, so it just remembers the height it was told.
+    let (birthday_height, last_block, commitment_tree) = if chain == Chain::Pivx {
+        let (checkpoint_height, commitment_tree) =
+            checkpoints::get_checkpoint(current_height as i32);
+        (checkpoint_height, checkpoint_height, commitment_tree.to_string())
+    } else {
+        (current_height as i32, current_height as i32, String::new())
+    };
 
     Ok(WalletData {
         version: 1,
+        chain,
         seed,
         extfvk: keys::encode_extfvk(&extfvk),
-        birthday_height: checkpoint_height,
-        last_block: checkpoint_height,
-        commitment_tree: commitment_tree.to_string(),
+        birthday_height,
+        last_block,
+        commitment_tree,
         unspent_notes: vec![],
         mnemonic: mnemonic_str.to_string(),
         unspent_utxos: vec![],
