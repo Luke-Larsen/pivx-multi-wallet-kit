@@ -2,7 +2,7 @@
 //!
 //! Pure logic. Consumers supply seeds; this module derives keys and addresses.
 
-use crate::params::{PIVX_COIN_TYPE, PIVX_PUBKEY_PREFIX};
+use crate::params::{Chain, PIVX_COIN_TYPE};
 use pivx_client_backend::encoding::{decode_payment_address, decode_transparent_address};
 use pivx_client_backend::keys::sapling as sapling_keys;
 use pivx_primitives::consensus::{NetworkConstants, MAIN_NETWORK};
@@ -138,11 +138,11 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 // Transparent key derivation (BIP32/BIP44)
 // ---------------------------------------------------------------------------
 
-/// Derive a transparent PIVX address from a BIP39 seed (64 bytes).
-/// Path: `m/44'/PIVX_COIN_TYPE'/0'/change/index`.
+/// Derive a transparent address from a BIP39 seed (64 bytes), for `chain`.
+/// Path: `m/44'/{chain's coin type}'/0'/change/index`.
 /// Returns `(base58 address, compressed pubkey [33], private key [32])`.
 #[allow(clippy::type_complexity)] // Tuple return is a documented stable shape; refactor tracked as an ergonomics concern
-/// Derive a BIP44 transparent key triple at `m/44'/119'/0'/{change}/{index}`.
+/// Derive a BIP44 transparent key triple at `m/44'/{coin_type}'/0'/{change}/{index}`.
 ///
 /// The privkey is returned wrapped in [`Zeroizing`]: it'll wipe its 32-byte
 /// buffer when the caller drops it. Callers that need to copy the bytes into
@@ -150,6 +150,7 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 /// `privkey.as_slice()`); copies into non-zeroizing containers re-introduce
 /// the leak. Pubkey + address are public material and not wrapped.
 pub fn transparent_key_from_bip39_seed(
+    chain: Chain,
     bip39_seed: &[u8],
     change: u32,
     index: u32,
@@ -157,9 +158,14 @@ pub fn transparent_key_from_bip39_seed(
     check_child_number("change", change)?;
     check_child_number("index", index)?;
 
-    let path: DerivationPath = format!("m/44'/{}'/0'/{}/{}", PIVX_COIN_TYPE, change, index)
-        .parse()
-        .map_err(|e| format!("Invalid derivation path: {e}"))?;
+    let path: DerivationPath = format!(
+        "m/44'/{}'/0'/{}/{}",
+        chain.params().coin_type,
+        change,
+        index
+    )
+    .parse()
+    .map_err(|e| format!("Invalid derivation path: {e}"))?;
 
     let child = XPrv::derive_from_path(bip39_seed, &path)
         .map_err(|e| format!("BIP32 derivation failed: {e}"))?;
@@ -168,7 +174,7 @@ pub fn transparent_key_from_bip39_seed(
     let pubkey_bytes = pubkey.to_bytes();
     let privkey_bytes = Zeroizing::new(child.to_bytes().to_vec());
 
-    let address = pubkey_to_pivx_address(&pubkey_bytes);
+    let address = pubkey_to_address(chain, &pubkey_bytes);
 
     Ok((address, pubkey_bytes.to_vec(), privkey_bytes))
 }
@@ -200,50 +206,46 @@ fn check_child_number(what: &str, n: u32) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Derive the transparent (`D...`) address at `m/44'/119'/0'/change/index`.
+/// Derive the transparent address at `m/44'/{coin_type}'/0'/change/index`.
 ///
 /// The counterpart to
 /// [`crate::transparent::coldstake::owner_hash_from_seed`], which produced the
-/// same key's `S...` form: a consumer could get the staking address for any
-/// slot but only the `0/0` transparent one, which is the wrong way round for
-/// address rotation (one address per invoice, per customer, per anything).
+/// same key's `S...` form (PIVX-only: Litecoin has no cold-staking): a
+/// consumer could get the staking address for any slot but only the `0/0`
+/// transparent one, which is the wrong way round for address rotation (one
+/// address per invoice, per customer, per anything).
 ///
 /// The private key is derived and dropped here, since only the address is
 /// wanted. [`Zeroizing`] wipes it on the way out.
 pub fn transparent_address_at(
+    chain: Chain,
     bip39_seed: &[u8],
     change: u32,
     index: u32,
 ) -> Result<String, Box<dyn Error>> {
     let (address, _pubkey, _privkey) =
-        transparent_key_from_bip39_seed(bip39_seed, change, index)?;
+        transparent_key_from_bip39_seed(chain, bip39_seed, change, index)?;
     Ok(address)
 }
 
 /// Get the default transparent address from a mnemonic string.
-/// Derives at path `m/44'/119'/0'/0/0`.
-pub fn get_transparent_address(mnemonic: &str) -> Result<String, Box<dyn Error>> {
+/// Derives at path `m/44'/{coin_type}'/0'/0/0`.
+pub fn get_transparent_address(chain: Chain, mnemonic: &str) -> Result<String, Box<dyn Error>> {
     let mnemonic_parsed = bip39::Mnemonic::parse_normalized(mnemonic)
         .map_err(|e| format!("Invalid mnemonic: {e}"))?;
     let bip39_seed = mnemonic_parsed.to_seed("");
-    let (address, _, _) = transparent_key_from_bip39_seed(&bip39_seed, 0, 0)?;
+    let (address, _, _) = transparent_key_from_bip39_seed(chain, &bip39_seed, 0, 0)?;
     Ok(address)
 }
 
-/// Convert a compressed (or uncompressed) public key to a PIVX transparent
-/// address (`D...`).
-pub fn pubkey_to_pivx_address(pubkey: &[u8]) -> String {
+/// Convert a compressed (or uncompressed) public key to a transparent
+/// (P2PKH) address for `chain`.
+pub fn pubkey_to_address(chain: Chain, pubkey: &[u8]) -> String {
     let sha_hash = Sha256::digest(pubkey);
     let pkh = Ripemd160::digest(sha_hash);
-
-    let mut payload = Vec::with_capacity(25);
-    payload.push(PIVX_PUBKEY_PREFIX);
-    payload.extend_from_slice(&pkh);
-
-    let checksum = Sha256::digest(Sha256::digest(&payload));
-    payload.extend_from_slice(&checksum[..4]);
-
-    bs58::encode(&payload).into_string()
+    let mut hash = [0u8; 20];
+    hash.copy_from_slice(&pkh);
+    crate::base58check::encode_checked(chain.params().pubkey_prefix, &hash)
 }
 
 /// Decode any PIVX address into a `GenericAddress` (shield or transparent).
@@ -265,7 +267,7 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
     }
 }
 
-/// Decode a base58 transparent PIVX address to its P2PKH scriptPubKey.
+/// Decode a base58 transparent address for `chain` to its P2PKH scriptPubKey.
 /// Returns the raw script bytes: `OP_DUP OP_HASH160 <20-byte-hash> OP_EQUALVERIFY OP_CHECKSIG`.
 ///
 /// Validates the Base58Check checksum and the version byte before building a
@@ -279,47 +281,27 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
 ///    output that can never be satisfied. A PIVX P2SH address (prefix 13,
 ///    `7...`) carries a *script* hash; spending a P2PKH output requires a
 ///    *public key* whose hash matches, which no script hash will ever be.
-///    Addresses from other networks are rejected for the same reason.
+///    Addresses from `chain`'s cousins (or the wrong `chain` argument) are
+///    rejected for the same reason.
 ///
 /// Callers that need P2SH support want a separate script builder: this one is
 /// P2PKH by construction, so it refuses anything else rather than silently
 /// mislabelling it.
-pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let decoded = bs58::decode(address)
-        .into_vec()
-        .map_err(|e| format!("Invalid base58 address: {e}"))?;
-    if decoded.len() != 25 {
+pub fn address_to_p2pkh_script(chain: Chain, address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let (version, pkh) = crate::base58check::decode_checked(address)?;
+
+    let expected = chain.params().pubkey_prefix;
+    if version != expected {
         return Err(format!(
-            "Invalid address length: {} bytes, expected 25 (1 version + 20 hash + 4 checksum)",
-            decoded.len()
+            "Address {address} has version byte {version}, not a {chain:?} transparent (P2PKH) \
+             address, which uses {expected}. Paying it as P2PKH would create an unspendable \
+             output."
         )
         .into());
     }
 
-    // Base58Check: the trailing 4 bytes are the first 4 of double-SHA256 over
-    // the version-and-hash payload.
-    let (payload, checksum) = decoded.split_at(21);
-    let expected = Sha256::digest(Sha256::digest(payload));
-    if expected[..4] != checksum[..] {
-        return Err(format!(
-            "Invalid address checksum for {address}: the address is mistyped or corrupted"
-        )
-        .into());
-    }
-
-    if payload[0] != PIVX_PUBKEY_PREFIX {
-        return Err(format!(
-            "Address {address} has version byte {}, not a PIVX transparent (P2PKH) address, \
-             which uses {PIVX_PUBKEY_PREFIX}. Paying it as P2PKH would create an unspendable \
-             output.",
-            payload[0]
-        )
-        .into());
-    }
-
-    let pkh = &payload[1..21];
     let mut script = vec![0x76, 0xa9, 0x14];
-    script.extend_from_slice(pkh);
+    script.extend_from_slice(&pkh);
     script.push(0x88);
     script.push(0xac);
     Ok(script)

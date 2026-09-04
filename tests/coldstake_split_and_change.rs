@@ -11,6 +11,7 @@
 //!   withdrawing 4,000 of their 10,000 does not expect the other 6,000 to go
 //!   idle.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::coldstake::{
     ColdStakeVariant, MIN_COLDSTAKING_AMOUNT, STAKE_SPLIT_TARGET, WithdrawalChange,
@@ -55,13 +56,13 @@ fn delegated_utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    pivx_wallet_kit::keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    pivx_wallet_kit::keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 /// Decode outputs as `(value, script)`.

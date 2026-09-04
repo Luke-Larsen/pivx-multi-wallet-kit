@@ -17,6 +17,7 @@
 
 mod common;
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
     Recipient, create_raw_transparent_transaction_from_utxos_to_many,
@@ -48,7 +49,7 @@ fn owner() -> [u8; 20] {
 }
 
 fn to_address() -> String {
-    pivx_wallet_kit::keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    pivx_wallet_kit::keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 fn staking_addr() -> String {
@@ -72,7 +73,7 @@ fn delegated(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
@@ -99,7 +100,7 @@ fn transparent_sends_cover_the_relay_minimum() {
                 .collect();
 
             let mut w = wallet_with(utxos);
-            let Ok(r) = create_raw_transparent_transaction_to_many(&mut w, &seed(), &rs) else {
+            let Ok(r) = create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), &rs) else {
                 continue;
             };
             assert_fee_covers_size(&format!("{recipients} recipients / {utxo_count} utxos"), &r.txhex, r.fee);
@@ -112,7 +113,7 @@ fn from_utxos_sends_cover_the_relay_minimum() {
     for utxo_count in 1..=5usize {
         let utxos: Vec<SerializedUTXO> =
             (0..utxo_count).map(|i| utxo("b", i as u32, 20 * COIN)).collect();
-        let r = create_raw_transparent_transaction_from_utxos_to_many(
+        let r = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
             &seed(),
             0,
             0,

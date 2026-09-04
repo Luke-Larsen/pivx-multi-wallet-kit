@@ -1,4 +1,8 @@
-//! PIVX chain constants: single source of truth for chain-specific values.
+//! Chain constants: single source of truth for chain-specific values.
+//!
+//! [`Chain`] selects which transparent-chain constants a call uses; Sapling
+//! shielding and cold-staking have no Litecoin equivalent and stay
+//! PIVX-only, ungated by this enum (see the modules that implement them).
 
 /// Satoshis per PIV (8 decimals).
 pub const COIN: u64 = 100_000_000;
@@ -58,3 +62,72 @@ pub const SIGHASH_ALL: u32 = 1;
 /// and recreates it inside a coinstake transaction, so a live delegation spends
 /// most of its life as a coinstake output.
 pub const COINBASE_MATURITY: u32 = 100;
+
+/// A transparent chain this kit can build addresses/transactions for.
+///
+/// Only the transparent-tx surface (`keys`, `messages`, `fees`,
+/// `transparent::builder`) dispatches on this. Sapling shielding and
+/// P2CS cold-staking have no Litecoin equivalent, so those modules stay
+/// unconditionally PIVX-only rather than taking a `Chain` they'd never
+/// use a second value of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+pub enum Chain {
+    #[default]
+    Pivx,
+    Litecoin,
+}
+
+/// The constants [`Chain`] selects between for transparent-tx work.
+pub struct ChainParams {
+    /// BIP44 coin type (SLIP-44).
+    pub coin_type: u32,
+    /// Base58Check version byte for a P2PKH address.
+    pub pubkey_prefix: u8,
+    /// Base58Check version byte for a cold-staking address. `None` where the
+    /// chain has no P2CS opcodes (Litecoin).
+    pub staking_prefix: Option<u8>,
+    /// Confirmations a coinbase output needs before it may be spent.
+    pub coinbase_maturity: u32,
+    /// Magic prefix for the `signmessage`/`verifymessage` digest.
+    pub msg_magic: &'static str,
+    /// Flat relay-fee rate, in satoshis per byte, for the raw P2PKH builder.
+    pub fee_per_byte: u64,
+    /// `DUST_RELAY_TX_FEE`-equivalent, in satoshis per kilobyte.
+    pub dust_relay_fee: u64,
+}
+
+pub const PIVX: ChainParams = ChainParams {
+    coin_type: PIVX_COIN_TYPE,
+    pubkey_prefix: PIVX_PUBKEY_PREFIX,
+    staking_prefix: Some(PIVX_STAKING_PREFIX),
+    coinbase_maturity: COINBASE_MATURITY,
+    msg_magic: "DarkNet Signed Message:\n",
+    fee_per_byte: 10,
+    dust_relay_fee: 30_000,
+};
+
+/// Litecoin mainnet transparent-chain constants.
+///
+/// `coinbase_maturity`, `fee_per_byte`, and `dust_relay_fee` are carried over
+/// from Litecoin Core's `chainparams.cpp`/`policy.h` defaults; reconfirm
+/// against a current node before relying on them for production fee/maturity
+/// decisions, since policy defaults can move independently of consensus.
+pub const LITECOIN: ChainParams = ChainParams {
+    coin_type: 2,
+    pubkey_prefix: 0x30,
+    staking_prefix: None,
+    coinbase_maturity: 100,
+    msg_magic: "Litecoin Signed Message:\n",
+    fee_per_byte: 10,
+    dust_relay_fee: 3_000,
+};
+
+impl Chain {
+    /// The constants for this chain.
+    pub const fn params(self) -> &'static ChainParams {
+        match self {
+            Chain::Pivx => &PIVX,
+            Chain::Litecoin => &LITECOIN,
+        }
+    }
+}

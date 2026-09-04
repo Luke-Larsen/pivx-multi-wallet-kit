@@ -12,6 +12,7 @@
 //! joins each funding transaction's `scriptPubKey` onto the UTXO entries, which
 //! the UTXO endpoint never returns and which cold staking cannot work without.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::sapling::builder as shield_builder;
 use pivx_wallet_kit::transparent::builder::{self as tb, Recipient};
 use pivx_wallet_kit::transparent::coldstake as cs;
@@ -26,7 +27,7 @@ fn mnemonic() -> String {
 }
 
 fn load() -> Result<WalletData, Box<dyn Error>> {
-    wallet::import_wallet(&mnemonic(), BIRTHDAY)
+    wallet::import_wallet(Chain::Pivx, &mnemonic(), BIRTHDAY)
 }
 
 fn seed(w: &WalletData) -> Vec<u8> {
@@ -63,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "addresses" => {
             println!("t 0/0   {}", w.get_transparent_address()?);
             for i in 1..=2u32 {
-                println!("t 0/{i}   {}", keys::transparent_address_at(&sd, 0, i)?);
+                println!("t 0/{i}   {}", keys::transparent_address_at(Chain::Pivx, &sd, 0, i)?);
             }
             println!("stake   {}", cs::encode_staking_address(&cs::owner_hash_from_seed(&sd, 0, 0)?));
             println!("shield  {}", keys::get_default_address(&w.extfvk)?);
@@ -89,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("immatureSat      : {} PIV", piv(w.get_immature_balance()));
             println!("shieldSat        : {} PIV", piv(w.get_balance()));
             let dest = w.get_transparent_address()?;
-            println!("maxSendable      : {} PIV", piv(tb::max_sendable_transparent(&w, 1)));
+            println!("maxSendable      : {} PIV", piv(tb::max_sendable_transparent(Chain::Pivx, &w, 1)));
             println!("maxShieldable    : {} PIV", piv(tb::max_shieldable_transparent(&w)));
             println!("maxShieldSpend   : {} PIV",
                 piv(shield_builder::max_shield_spendable(&w, &dest)));
@@ -109,9 +110,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 })
                 .collect();
-            let est = tb::estimate_raw_transparent_fee_to_many(&w, &recipients)?;
+            let est = tb::estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients)?;
             println!("estimated fee: {} PIV", piv(est));
-            let r = tb::create_raw_transparent_transaction_to_many(&mut w, &sd, &recipients)?;
+            let r = tb::create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &sd, &recipients)?;
             assert_eq!(r.fee, est, "estimator and builder disagreed");
             report("send", &r);
         }
@@ -122,7 +123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let index: u32 = args[4].parse()?;
             let utxos = utxos_from(&args[2], Some(HdSlot { change, index }))?;
             let amount = pivx_wallet_kit::amount::parse_piv_to_sat(&args[6])?;
-            let r = tb::create_raw_transparent_transaction_from_utxos(
+            let r = tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
                 &sd, change, index, &utxos, &args[5], amount,
             )?;
             report("send-from-slot", &r);
@@ -153,14 +154,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         "sign" => {
-            let (_, _, pk) = keys::transparent_key_from_bip39_seed(&sd, 0, 0)?;
-            let sig = pivx_wallet_kit::messages::sign_message(&pk, &args[2])?;
+            let (_, _, pk) = keys::transparent_key_from_bip39_seed(Chain::Pivx, &sd, 0, 0)?;
+            let sig = pivx_wallet_kit::messages::sign_message(Chain::Pivx, &pk, &args[2])?;
             let addr = w.get_transparent_address()?;
             println!("address  : {addr}");
             println!("message  : {}", args[2]);
             println!("signature: {sig}");
             println!("verifies : {}",
-                pivx_wallet_kit::messages::verify_message(&addr, &args[2], &sig)?);
+                pivx_wallet_kit::messages::verify_message(Chain::Pivx, &addr, &args[2], &sig)?);
         }
 
         "inspect" => {
@@ -207,7 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|u| SerializedUTXO { hd_slot: Some(HdSlot { change: 0, index: 5 }), ..u })
                 .collect();
             check("rotated coins unreachable by wallet-state send",
-                tb::create_raw_transparent_transaction_to_many(
+                tb::create_raw_transparent_transaction_to_many(Chain::Pivx, 
                     &mut rot, &sd, &[Recipient { address: dest.clone(), amount: 100_000 }])
                     .map(|r| r.txhex).map_err(|e| e.to_string()),
                 "HD slot");
@@ -232,7 +233,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 mixed[0].hd_slot = Some(HdSlot { change: 0, index: 1 });
                 mixed[1].hd_slot = Some(HdSlot { change: 0, index: 2 });
                 check("mixed-slot input set refused (by tag)",
-                    tb::create_raw_transparent_transaction_from_utxos(
+                    tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
                         &sd, 0, 1, &mixed, &dest, 100_000)
                         .map(|r| r.txhex).map_err(|e| e.to_string()),
                     "was received at HD slot");
@@ -245,7 +246,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..real[0].clone()
             }];
             check("mis-tagged input caught by its scriptPubKey",
-                tb::create_raw_transparent_transaction_from_utxos(
+                tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
                     &sd, 0, 1, &mistagged, &dest, 100_000)
                     .map(|r| r.txhex).map_err(|e| e.to_string()),
                 "cannot sign for");
@@ -253,7 +254,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // 4. Malformed txid.
             let bad = vec![SerializedUTXO { txid: "z".repeat(64), ..real[0].clone() }];
             check("malformed txid refused",
-                tb::create_raw_transparent_transaction_from_utxos(&sd, 0, 0, &bad, &dest, 100_000)
+                tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, &sd, 0, 0, &bad, &dest, 100_000)
                     .map(|r| r.txhex).map_err(|e| e.to_string()),
                 "malformed txid");
 
@@ -261,7 +262,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut dw = load()?;
             dw.unspent_utxos = real.clone();
             check("dust recipient refused (transparent)",
-                tb::create_raw_transparent_transaction_to_many(
+                tb::create_raw_transparent_transaction_to_many(Chain::Pivx, 
                     &mut dw, &sd, &[Recipient { address: dest.clone(), amount: 1_000 }])
                     .map(|r| r.txhex).map_err(|e| e.to_string()),
                 "dust threshold");
@@ -283,19 +284,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             // 8. Duplicate outpoint.
             let dupes = vec![real[0].clone(), real[0].clone()];
             check("duplicate outpoint refused",
-                tb::create_raw_transparent_transaction_from_utxos(&sd, 0, 0, &dupes, &dest, 100_000)
+                tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, &sd, 0, 0, &dupes, &dest, 100_000)
                     .map(|r| r.txhex).map_err(|e| e.to_string()),
                 "Duplicate UTXO");
 
             // 9. HD index past the non-hardened ceiling.
             check("hardened HD index refused",
-                keys::transparent_address_at(&sd, 0, 0x8000_0000).map_err(|e| e.to_string()),
+                keys::transparent_address_at(Chain::Pivx, &sd, 0, 0x8000_0000).map_err(|e| e.to_string()),
                 "non-hardened");
 
             // 10. Paying a staking address as if it were transparent.
             let s_addr = cs::encode_staking_address(&cs::owner_hash_from_seed(&sd, 0, 0)?);
             check("staking address rejected as a P2PKH destination",
-                keys::address_to_p2pkh_script(&s_addr).map(|_| String::new())
+                keys::address_to_p2pkh_script(Chain::Pivx, &s_addr).map(|_| String::new())
                     .map_err(|e| e.to_string()),
                 "version byte");
 

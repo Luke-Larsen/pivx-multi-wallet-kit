@@ -10,6 +10,7 @@
 
 use crate::fees;
 use crate::keys::{self, GenericAddress};
+use crate::params::Chain;
 use crate::sapling::builder::read_tree_hex;
 use crate::sapling::prover::SaplingProver;
 use crate::transparent::tx::write_varint;
@@ -96,6 +97,7 @@ pub(crate) fn write_outputs(buf: &mut Vec<u8>, outputs: &[TxOutput]) {
 /// produce a transaction the network rejects for reasons that are hard to
 /// trace back here.
 fn resolve_outputs(
+    chain: Chain,
     recipients: &[Recipient],
     change: u64,
     change_script: &[u8],
@@ -109,17 +111,17 @@ fn resolve_outputs(
         if r.amount == 0 {
             return Err(format!("Recipient {} has a zero amount", r.address).into());
         }
-        let script = keys::address_to_p2pkh_script(&r.address)?;
+        let script = keys::address_to_p2pkh_script(chain, &r.address)?;
         // A dust output makes the whole transaction non-standard, so no node
         // relays it. Better to refuse than to hand back bytes that cannot be
         // broadcast.
-        if fees::is_dust(r.amount, script.len()) {
+        if fees::is_dust(chain, r.amount, script.len()) {
             return Err(format!(
                 "Recipient {} is below the dust threshold: {} sat, minimum {} sat. A transaction \
                  containing a dust output is non-standard and will not relay.",
                 r.address,
                 r.amount,
-                fees::dust_threshold(script.len())
+                fees::dust_threshold(chain, script.len())
             )
             .into());
         }
@@ -130,7 +132,7 @@ fn resolve_outputs(
     // transaction unrelayable, so the remainder goes to the miner as fee. This
     // is what the reference wallets do, and it is why the caller's fee can come
     // out slightly above the estimate.
-    if change > 0 && !fees::is_dust(change, change_script.len()) {
+    if change > 0 && !fees::is_dust(chain, change, change_script.len()) {
         outputs.push(TxOutput {
             value: change,
             script: change_script.to_vec(),
@@ -169,6 +171,7 @@ struct TransparentSelection {
 /// many inputs selection ends up reaching for, so an estimator that did its
 /// own selection could quote a different fee than the builder charges.
 fn select_transparent_utxos(
+    chain: Chain,
     wallet: &WalletData,
     recipients: &[Recipient],
 ) -> Result<TransparentSelection, Box<dyn Error>> {
@@ -176,7 +179,8 @@ fn select_transparent_utxos(
         return Err("No recipients provided".into());
     }
     for r in recipients {
-        if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+        if chain == Chain::Pivx && r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
+        {
             return Err(format!(
                 "Shield recipient {} is not supported in a multi-recipient transparent send: \
                  use create_shielding_transaction for shield destinations",
@@ -189,7 +193,7 @@ fn select_transparent_utxos(
         }
         // Reject an unusable address before doing any selection work, so the
         // estimator and the builder fail on the same input for the same reason.
-        keys::address_to_p2pkh_script(&r.address)?;
+        keys::address_to_p2pkh_script(chain, &r.address)?;
     }
 
     let amount = total_recipient_amount(recipients)?;
@@ -216,13 +220,13 @@ fn select_transparent_utxos(
         total = total
             .checked_add(utxo.amount)
             .ok_or("UTXO total overflow: explorer returned malformed amounts")?;
-        let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
+        let fee = fees::estimate_raw_transparent_fee(chain, selected.len(), fee_output_count);
         if total >= amount.saturating_add(fee) {
             break;
         }
     }
 
-    let fee = fees::estimate_raw_transparent_fee(selected.len(), fee_output_count);
+    let fee = fees::estimate_raw_transparent_fee(chain, selected.len(), fee_output_count);
     let needed = amount
         .checked_add(fee)
         .ok_or("Amount plus fee overflows u64")?;
@@ -264,10 +268,11 @@ fn select_transparent_utxos(
 /// cannot know that before the outputs are resolved.
 /// `TransparentTransactionResult::fee` always reports the true figure.
 pub fn estimate_raw_transparent_fee_to_many(
+    chain: Chain,
     wallet: &WalletData,
     recipients: &[Recipient],
 ) -> Result<u64, Box<dyn Error>> {
-    Ok(select_transparent_utxos(wallet, recipients)?.fee)
+    Ok(select_transparent_utxos(chain, wallet, recipients)?.fee)
 }
 
 /// The UTXOs an ordinary transparent send may select from, largest first.
@@ -350,7 +355,7 @@ fn no_spendable_utxos_error(wallet: &WalletData) -> Box<dyn Error> {
 /// outputs worth less than they cost to spend, selection stops before reaching
 /// them and the true maximum is marginally higher than this. The difference is
 /// smaller than the fee of one input.
-pub fn max_sendable_transparent(wallet: &WalletData, recipient_count: usize) -> u64 {
+pub fn max_sendable_transparent(chain: Chain, wallet: &WalletData, recipient_count: usize) -> u64 {
     let utxos = spendable_utxos(wallet);
     if utxos.is_empty() || recipient_count == 0 {
         return 0;
@@ -361,10 +366,10 @@ pub fn max_sendable_transparent(wallet: &WalletData, recipient_count: usize) -> 
     // Recipients plus a possible change output, matching `select_transparent_utxos`.
     // A max send emits no change, so this over-estimates by one output's worth,
     // which is the direction that keeps the figure buildable.
-    let fee = fees::estimate_raw_transparent_fee(utxos.len(), recipient_count + 1);
+    let fee = fees::estimate_raw_transparent_fee(chain, utxos.len(), recipient_count + 1);
     let max = total.saturating_sub(fee);
     // 25 bytes: the P2PKH script every ordinary recipient is paid with.
-    if max < fees::dust_threshold(25) {
+    if max < fees::dust_threshold(chain, 25) {
         return 0;
     }
     max
@@ -470,6 +475,7 @@ pub(crate) fn validate_outpoints(utxos: &[SerializedUTXO]) -> Result<(), Box<dyn
 ///    one. Only available when the consumer joined scripts on, which the cold
 ///    staking flows already require.
 fn reject_foreign_slot_utxos(
+    chain: Chain,
     utxos: &[SerializedUTXO],
     from_change: u32,
     from_index: u32,
@@ -506,10 +512,7 @@ fn reject_foreign_slot_utxos(
             .map(|h| {
                 format!(
                     "is paid to {}",
-                    crate::transparent::coldstake::encode_checked(
-                        crate::params::PIVX_PUBKEY_PREFIX,
-                        &h
-                    )
+                    crate::base58check::encode_checked(chain.params().pubkey_prefix, &h)
                 )
             })
             .unwrap_or_else(|| "is not a P2PKH output".to_string());
@@ -567,7 +570,7 @@ pub fn create_shielding_transaction(
     let network = MAIN_NETWORK;
 
     let (own_address, _pubkey_bytes, privkey_bytes) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, 0, 0)?;
+        keys::transparent_key_from_bip39_seed(Chain::Pivx, bip39_seed, 0, 0)?;
 
     let sk = secp256k1::SecretKey::from_slice(&privkey_bytes)
         .map_err(|e| format!("Invalid private key: {e}"))?;
@@ -734,6 +737,7 @@ pub fn create_shielding_transaction(
 /// [`create_shielding_transaction`]. Both `block_height_for_shield` (the
 /// chain tip) and `prover_for_shield` (a loaded Sapling prover) are required.
 pub fn create_raw_transparent_transaction(
+    chain: Chain,
     wallet: &mut WalletData,
     bip39_seed: &[u8],
     to_address: &str,
@@ -741,7 +745,8 @@ pub fn create_raw_transparent_transaction(
     block_height_for_shield: u32,
     prover_for_shield: Option<&SaplingProver>,
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
-    if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+    if chain == Chain::Pivx && to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
+    {
         let prover = prover_for_shield.ok_or(
             "Shield destination requires a Sapling prover (call verify_and_load_params first)",
         )?;
@@ -756,6 +761,7 @@ pub fn create_raw_transparent_transaction(
     }
 
     create_raw_transparent_transaction_to_many(
+        chain,
         wallet,
         bip39_seed,
         &[Recipient {
@@ -780,19 +786,20 @@ pub fn create_raw_transparent_transaction(
 /// `TransparentTransactionResult::amount` is the sum paid to recipients,
 /// excluding change and fee.
 pub fn create_raw_transparent_transaction_to_many(
+    chain: Chain,
     wallet: &mut WalletData,
     bip39_seed: &[u8],
     recipients: &[Recipient],
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
     let (own_address, pubkey_bytes, privkey_bytes) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, 0, 0)?;
-    let own_script = keys::address_to_p2pkh_script(&own_address)?;
+        keys::transparent_key_from_bip39_seed(chain, bip39_seed, 0, 0)?;
+    let own_script = keys::address_to_p2pkh_script(chain, &own_address)?;
 
-    let selection = select_transparent_utxos(wallet, recipients)?;
+    let selection = select_transparent_utxos(chain, wallet, recipients)?;
     let (selected, amount, fee) = (selection.selected, selection.amount, selection.fee);
 
     let change = selection.total - amount - fee;
-    let outputs = resolve_outputs(recipients, change, &own_script)?;
+    let outputs = resolve_outputs(chain, recipients, change, &own_script)?;
     // `resolve_outputs` drops dust change rather than emitting an unrelayable
     // output, so the fee actually paid is whatever the outputs did not claim.
     let fee = selection.total - outputs.iter().map(|o| o.value).sum::<u64>();
@@ -849,6 +856,7 @@ pub fn create_raw_transparent_transaction_to_many(
 /// state-aware sibling, including the `spent` list so the caller can
 /// reconcile its own UTXO bookkeeping.
 pub fn create_raw_transparent_transaction_from_utxos(
+    chain: Chain,
     bip39_seed: &[u8],
     from_change: u32,
     from_index: u32,
@@ -857,6 +865,7 @@ pub fn create_raw_transparent_transaction_from_utxos(
     amount: u64,
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
     create_raw_transparent_transaction_from_utxos_to_many(
+        chain,
         bip39_seed,
         from_change,
         from_index,
@@ -883,6 +892,7 @@ pub fn create_raw_transparent_transaction_from_utxos(
 /// `TransparentTransactionResult::amount` is the sum paid to recipients,
 /// excluding change and fee.
 pub fn create_raw_transparent_transaction_from_utxos_to_many(
+    chain: Chain,
     bip39_seed: &[u8],
     from_change: u32,
     from_index: u32,
@@ -920,7 +930,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
                 u.txid,
                 u.vout,
                 u.confirmations,
-                crate::params::COINBASE_MATURITY + 1,
+                chain.params().coinbase_maturity + 1,
                 u.blocks_until_mature(),
             )
             .into());
@@ -928,7 +938,8 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     }
 
     for r in recipients {
-        if r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
+        if chain == Chain::Pivx && r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
+        {
             return Err(format!(
                 "Shield recipient {} is not supported in a raw transparent send",
                 r.address
@@ -940,10 +951,10 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
     let amount = total_recipient_amount(recipients)?;
 
     let (own_address, pubkey_bytes, privkey_bytes) =
-        keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
-    let own_script = keys::address_to_p2pkh_script(&own_address)?;
+        keys::transparent_key_from_bip39_seed(chain, bip39_seed, from_change, from_index)?;
+    let own_script = keys::address_to_p2pkh_script(chain, &own_address)?;
 
-    reject_foreign_slot_utxos(utxos, from_change, from_index, &own_address, &own_script)?;
+    reject_foreign_slot_utxos(chain, utxos, from_change, from_index, &own_address, &own_script)?;
 
     // Sum all provided UTXOs: every one of them gets spent. Refund
     // addresses are single-use so there's nothing to leave behind.
@@ -954,7 +965,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
 
     // Fee assumes a change output; if it turns out to be zero the tx is
     // simply smaller than budgeted, which over-pays rather than under-pays.
-    let fee = fees::estimate_raw_transparent_fee(utxos.len(), recipients.len() + 1);
+    let fee = fees::estimate_raw_transparent_fee(chain, utxos.len(), recipients.len() + 1);
     let needed = amount
         .checked_add(fee)
         .ok_or("Amount plus fee overflows u64")?;
@@ -968,7 +979,7 @@ pub fn create_raw_transparent_transaction_from_utxos_to_many(
 
     let change = total - needed;
     let selected = utxos.to_vec();
-    let outputs = resolve_outputs(recipients, change, &own_script)?;
+    let outputs = resolve_outputs(chain, recipients, change, &own_script)?;
     // See the note in the wallet-state path: dropped dust change raises the fee.
     let fee = total - outputs.iter().map(|o| o.value).sum::<u64>();
     let signing_inputs: Vec<SigningInput> = selected

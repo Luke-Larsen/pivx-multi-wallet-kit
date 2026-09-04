@@ -23,6 +23,7 @@
 //! the properties rather than the construction, so a future cipher change has
 //! to keep them.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::wallet::{self, WalletData};
 
@@ -54,7 +55,7 @@ fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
 
 #[test]
 fn the_seed_and_mnemonic_do_not_share_a_keystream() {
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
     let json = wallet::serialize_encrypted(&w, &key(0x42)).unwrap();
     let (ct_seed, ct_mnemonic) = ciphertexts(&json);
 
@@ -76,8 +77,8 @@ fn the_seed_and_mnemonic_do_not_share_a_keystream() {
 fn two_wallets_under_one_key_do_not_share_a_keystream() {
     // The native path derives the key from the machine id, so this is the
     // normal case there, not an exotic one.
-    let a = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
-    let b = wallet::import_wallet(OTHER_MNEMONIC, 5_000_000).unwrap();
+    let a = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
+    let b = wallet::import_wallet(Chain::Pivx, OTHER_MNEMONIC, 5_000_000).unwrap();
     let shared = key(0x99);
 
     let ja = wallet::serialize_encrypted(&a, &shared).unwrap();
@@ -100,7 +101,7 @@ fn encrypting_the_same_wallet_twice_gives_different_ciphertext() {
     // Without a nonce the output is a pure function of (wallet, key), so an
     // observer can tell that two files are the same wallet, and that a wallet
     // did not change between two backups.
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
     let first = wallet::serialize_encrypted(&w, &key(0x42)).unwrap();
     let second = wallet::serialize_encrypted(&w, &key(0x42)).unwrap();
 
@@ -119,7 +120,7 @@ fn encrypting_the_same_wallet_twice_gives_different_ciphertext() {
 
 #[test]
 fn the_round_trip_still_works_and_the_wrong_key_still_fails() {
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
     let json = wallet::serialize_encrypted(&w, &key(0x42)).unwrap();
 
     let restored = wallet::deserialize_encrypted(&json, &key(0x42)).unwrap();
@@ -142,7 +143,7 @@ fn the_round_trip_still_works_and_the_wrong_key_still_fails() {
 fn a_nonce_is_persisted_and_is_gone_again_after_decrypting() {
     // The invariant the reader depends on: a nonce is present exactly when the
     // secret fields hold ciphertext.
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
     assert!(w.cipher_nonce.is_none(), "a fresh wallet holds plaintext");
 
     let json = wallet::serialize_encrypted(&w, &key(0x42)).unwrap();
@@ -167,7 +168,7 @@ fn a_wallet_encrypted_before_the_nonce_existed_still_opens() {
     // looks like this, and refusing it would strand funds behind a file the kit
     // itself wrote.
     let k = key(0x42);
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
 
     let mut legacy: serde_json::Value = serde_json::to_value(&w).unwrap();
     let legacy_seed = wallet::crypt(&seed_of(&w), &k);
@@ -191,7 +192,7 @@ fn re_saving_a_legacy_wallet_writes_it_in_the_new_format() {
     // The migration path: open old, save new, and the leak is gone without the
     // consumer doing anything.
     let k = key(0x42);
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
 
     let mut legacy: serde_json::Value = serde_json::to_value(&w).unwrap();
     legacy["seed"] = serde_json::json!(wallet::crypt(&seed_of(&w), &k));
@@ -214,7 +215,7 @@ fn re_saving_a_legacy_wallet_writes_it_in_the_new_format() {
 #[test]
 fn a_corrupted_nonce_is_reported_rather_than_used() {
     let k = key(0x42);
-    let w = wallet::import_wallet(MNEMONIC, 5_000_000).unwrap();
+    let w = wallet::import_wallet(Chain::Pivx, MNEMONIC, 5_000_000).unwrap();
     let json = wallet::serialize_encrypted(&w, &k).unwrap();
 
     let mut broken: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -228,6 +229,21 @@ fn a_corrupted_nonce_is_reported_rather_than_used() {
         err.contains("nonce"),
         "a truncated nonce must be named, not silently padded: {err}"
     );
+}
+
+/// The `chain` field is public, plaintext, and unaffected by encryption, but
+/// it still has to survive the encrypt-then-decrypt round trip along with the
+/// fields that are.
+#[test]
+fn a_litecoin_wallets_chain_survives_encrypt_decrypt() {
+    let k = key(0x42);
+    let w = wallet::import_wallet(Chain::Litecoin, MNEMONIC, 5_000_000).unwrap();
+    assert_eq!(w.chain, Chain::Litecoin);
+
+    let json = wallet::serialize_encrypted(&w, &k).unwrap();
+    let opened = wallet::deserialize_encrypted(&json, &k).unwrap();
+    assert_eq!(opened.chain, Chain::Litecoin);
+    assert!(opened.get_transparent_address().unwrap().starts_with('L'));
 }
 
 /// The plaintext seed of a decrypted wallet, via its serialized form (the field

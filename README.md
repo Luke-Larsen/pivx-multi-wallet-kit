@@ -3,7 +3,8 @@
 [![CI](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@pivx-labs/pivx-wallet-kit?color=cb3837&logo=npm)](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit)
 
-Pure-Rust wallet primitives for [PIVX](https://pivx.org), with first-class Sapling shield support.
+Pure-Rust wallet primitives for [PIVX](https://pivx.org) (transparent + Sapling shield) and
+[Litecoin](https://litecoin.org) (transparent only).
 
 Designed as the shared core that powers PIVX wallet clients (native CLIs, MCP servers, desktop apps, and embeddable web wallets) from a single audited codebase.
 
@@ -16,6 +17,7 @@ PIVX Wallet Kit consolidates that core into one library:
 - **No I/O, no network, no filesystem.** The kit is pure logic. Consumers provide block data, current heights, proving-parameter bytes, and their own encryption keys.
 - **Native + WASM.** Compiles to x86_64, aarch64, and `wasm32-unknown-unknown`, so the same code runs in [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) on a server and in a browser wallet with zero logic drift.
 - **Sapling-native.** Built on the [`librustpivx`](https://github.com/Duddino/librustpivx) fork of the Zcash Sapling crates, with PIVX's v3 type 0 transaction format.
+- **Multi-chain where it's genuinely shared.** BIP44 key derivation, P2PKH addressing, raw transaction signing, fee estimation, and message signing are the same algorithm across the whole Bitcoin-descended family, so a [`Chain`](#litecoin-support) parameter picks PIVX's or Litecoin's constants on one shared code path. Sapling shielding and pay-to-cold-staking stay PIVX-only by construction: Litecoin has no equivalent of either, so there is nothing to generalize.
 
 ## Architecture
 
@@ -31,21 +33,22 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 
 | Module                          | Purpose                                                                    |
 |---------------------------------|----------------------------------------------------------------------------|
-| `params`                        | PIVX chain constants: coin type, prefixes, coinbase maturity, Sapling param SHA256 hashes |
+| `params`                        | `Chain` (`Pivx`/`Litecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate — plus the PIVX-only Sapling param SHA256 hashes |
+| `base58check`                   | Base58Check codec shared by both chains' P2PKH addressing               |
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
-| `checkpoints`                   | Embedded mainnet checkpoint data for fast initial sync                     |
-| `keys`                          | BIP32/BIP44 derivation, Sapling ZIP32 keys, transparent address encoding   |
-| `messages`                      | PIVX Core-compatible message signing / verification                        |
-| `fees`                          | Component-based fee estimation for v3 and raw v1 transactions              |
-| `wallet`                        | In-memory `WalletData`, (de)serialization, symmetric secret encryption, Blockbook UTXO parser |
-| `sync`                          | Pure shield stream parser: bytes → block batches                          |
-| `sapling::sync`                 | `handle_blocks`: decrypt notes, advance tree, extract nullifiers           |
-| `sapling::tree`                 | Commitment tree root extraction and empty-tree helpers                     |
-| `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes)         |
-| `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) |
-| `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry: no prover needed for transparent dests) |
-| `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders |
-| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers |
+| `checkpoints`                   | Embedded PIVX mainnet checkpoint data for fast initial Sapling sync *(PIVX-only)* |
+| `keys`                          | `Chain`-parameterized BIP32/BIP44 derivation and transparent address encoding, plus PIVX-only Sapling ZIP32 keys |
+| `messages`                      | `Chain`-parameterized Core-compatible message signing / verification       |
+| `fees`                          | `Chain`-parameterized fee estimation for raw v1 transactions, plus the PIVX-only v3/Sapling fee model |
+| `wallet`                        | In-memory `WalletData` (carries a `chain` field), (de)serialization, symmetric secret encryption, Blockbook UTXO parser |
+| `sync`                          | Pure PIVX shield stream parser: bytes → block batches *(PIVX-only)*       |
+| `sapling::sync`                 | `handle_blocks`: decrypt notes, advance tree, extract nullifiers *(PIVX-only)* |
+| `sapling::tree`                 | Commitment tree root extraction and empty-tree helpers *(PIVX-only)*      |
+| `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes) *(PIVX-only)* |
+| `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) *(PIVX-only)* |
+| `transparent::builder`          | `Chain`-parameterized raw P2PKH transaction builder (canonical entry for both chains) + PIVX-only `create_shielding_transaction` (t → shield) |
+| `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders *(PIVX-only)* |
+| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers, with additive `createLitecoin` / `fromMnemonicLitecoin` / `verifyMessageLitecoin` entry points |
 
 ## Building
 
@@ -56,7 +59,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (281 total: 16 unit + 265 integration, many against real
+# Tests (311 total: 18 unit + 293 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -98,10 +101,11 @@ pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit" }
 
 ```rust
 use pivx_wallet_kit::{wallet, sapling, transparent, keys};
+use pivx_wallet_kit::params::Chain;
 
 // Import from mnemonic: consumer fetches current height from its RPC source.
 let current_height = fetch_from_rpc();
-let mut w = wallet::import_wallet(&mnemonic, current_height)?;
+let mut w = wallet::import_wallet(Chain::Pivx, &mnemonic, current_height)?;
 
 // Derive addresses (no prover needed):
 let shield      = keys::get_default_address(&w.extfvk)?;
@@ -110,16 +114,16 @@ let transparent = w.get_transparent_address()?;
 // Rotate receive addresses. Shield diversifiers all share one spending key;
 // transparent slots are separate keys, so see "Rotating transparent addresses".
 let (used_index, invoice_shield) = keys::shield_address_at(&w.extfvk, next_index)?;
-let invoice_transparent = keys::transparent_address_at(&w.get_bip39_seed()?, 0, next_index)?;
+let invoice_transparent = keys::transparent_address_at(Chain::Pivx, &w.get_bip39_seed()?, 0, next_index)?;
 
 // Sign an arbitrary message with the transparent key (PIVX Core-compatible).
 let bip39_seed = w.get_bip39_seed()?;
-let (_, _, privkey) = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0)?;
-let signature = pivx_wallet_kit::messages::sign_message(&privkey, "hello")?;
+let (_, _, privkey) = keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 0)?;
+let signature = pivx_wallet_kit::messages::sign_message(Chain::Pivx, &privkey, "hello")?;
 
 // Build a pure transparent send (still no prover needed):
 let tx = transparent::builder::create_raw_transparent_transaction(
-    &mut w, &bip39_seed, &to_t_addr, amount_sat,
+    Chain::Pivx, &mut w, &bip39_seed, &to_t_addr, amount_sat,
     0, None, // block_height / prover only used when destination is shield
 )?;
 
@@ -133,6 +137,10 @@ let tx = sapling::builder::create_shield_transaction(
 
 // Consumer broadcasts `tx.txhex` via whatever transport it chooses.
 ```
+
+Every transparent-tx entry point (`keys`, `messages`, `fees`, `transparent::builder`) takes a leading
+[`Chain`](#litecoin-support) so the same code path serves PIVX and Litecoin; Sapling and cold-staking
+have no `Chain` parameter at all, since neither exists on Litecoin.
 
 ### Browser (npm)
 
@@ -237,7 +245,39 @@ localStorage.setItem('wallet', encrypted);
 
 **See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo**: one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
 
-### Cold staking needs scripts
+### Litecoin support
+
+Litecoin support is **transparent-only**: BIP44 key derivation, legacy P2PKH addresses
+(`L...`, Base58Check version byte `0x30`), raw v1 transaction building/signing, fee
+estimation, and message signing. There is no Litecoin equivalent of Sapling shielding or
+PIVX's pay-to-cold-staking, so neither exists on a Litecoin wallet: calling a `shield*` or
+`*ColdStake*` method on one returns an error (or, for read-only balance getters, `0`/empty
+rather than an error, so a generic dashboard can call them unconditionally). Bech32/SegWit
+(`ltc1...`) addresses are not yet supported.
+
+Native Rust callers select the chain by passing `pivx_wallet_kit::params::Chain::Litecoin`
+to `wallet::import_wallet` / `wallet::create_new_wallet` and to every `keys` / `messages` /
+`fees` / `transparent::builder` function that takes a `chain` argument; the wallet then
+remembers its own chain (`WalletData::chain`) so its own methods (`get_transparent_address`,
+and every wasm method below) need no further chain argument.
+
+```js
+// Same shape as the PIVX example above, using the additive Litecoin constructors.
+const wallet = Wallet.fromMnemonicLitecoin(phrase, currentHeight);
+const transparent = wallet.transparentAddress(); // an "L..." address
+
+const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json()); // any Blockbook-compatible LTC explorer
+wallet.setUtxos(parseBlockbookUtxos(raw));
+
+const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
+const sig = wallet.signMessage('hello');
+console.log(verifyMessageLitecoin(transparent, 'hello', sig));
+
+// wallet.shieldAddress(), wallet.delegateColdStake(...), etc. all error: not
+// supported on a Litecoin wallet.
+```
+
+### Cold staking needs scripts (PIVX-only)
 
 A delegation is recognisable *only* from its `scriptPubKey`, and no explorer returns one from its UTXO endpoint: not Blockbook, not its work-alikes such as [rusty-blox](https://github.com/Liquid369/rusty-blox). Nothing else about a delegated output distinguishes it from an ordinary one, and the sighash commits to the exact script, so it cannot be inferred either.
 
@@ -269,7 +309,7 @@ wallet.delegatedBalanceSat(); // now non-zero if anything is delegated
 
 `/api/v2/address/{addr}?details=txs` is the bulk alternative: it returns the same `vout[].hex` for every transaction touching the address, in one paged call.
 
-#### Staked delegations are coinstake outputs
+#### Staked delegations are coinstake outputs (PIVX-only)
 
 Staking a delegation **consumes and recreates it**. The script is preserved byte-for-byte (consensus requires it, so the delegation keeps working and `is_p2cs` keeps matching), but the outpoint changes on every stake and the replacement lives in a *coinstake* transaction. Two consequences:
 
@@ -371,7 +411,7 @@ If you joined scripts on for cold staking, the same check runs against the `scri
 
 Untagged UTXOs are unaffected: no tag means "unknown", never "not this slot", so everything written before `hdSlot` existed behaves exactly as it did, including consumers already rotating by tracking slots outside the kit.
 
-#### Cold staking is `0/0`-only on the delegating side
+#### Cold staking is `0/0`-only on the delegating side (PIVX-only)
 
 The two halves of cold staking are not symmetric about the slot, and rotation is what makes the difference reachable:
 

@@ -10,6 +10,7 @@
 //! So the property under test throughout is: whatever `max_sendable_transparent`
 //! returns, the builder accepts.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::builder::{
     Recipient, TransparentTransactionResult, create_raw_transparent_transaction_to_many,
@@ -60,13 +61,13 @@ fn coinstake(letter: &str, vout: u32, amount: u64, confirmations: u32) -> Serial
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    pivx_wallet_kit::keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    pivx_wallet_kit::keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 fn recipients(amount: u64) -> Vec<Recipient> {
@@ -80,7 +81,7 @@ fn build(
     rs: &[Recipient],
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
     let mut w = wallet_with(utxos);
-    create_raw_transparent_transaction_to_many(&mut w, &seed(), rs)
+    create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &seed(), rs)
 }
 
 /// The core contract: the figure offered is a figure the builder will build.
@@ -89,7 +90,7 @@ fn the_maximum_is_buildable() {
     let utxos =
         vec![ordinary("a", 0, 10_000_000), ordinary("b", 1, 3_000_000), ordinary("c", 2, 500_000)];
 
-    let max = max_sendable_transparent(&wallet_with(utxos.clone()), 1);
+    let max = max_sendable_transparent(Chain::Pivx, &wallet_with(utxos.clone()), 1);
     assert!(max > 0);
 
     build(utxos, &recipients(max)).expect("the advertised maximum must be spendable");
@@ -100,7 +101,7 @@ fn the_maximum_is_buildable() {
 fn one_satoshi_above_the_maximum_is_refused() {
     let utxos = vec![ordinary("a", 0, 10_000_000), ordinary("b", 1, 3_000_000)];
 
-    let max = max_sendable_transparent(&wallet_with(utxos.clone()), 1);
+    let max = max_sendable_transparent(Chain::Pivx, &wallet_with(utxos.clone()), 1);
     let err = build(utxos, &recipients(max + 1)).expect_err("max + 1 must not build");
     assert!(err.to_string().contains("Insufficient"), "unexpected error: {err}");
 }
@@ -113,7 +114,7 @@ fn the_maximum_leaves_no_change() {
     let w = wallet_with(utxos.clone());
 
     let spendable = w.get_transparent_balance();
-    let max = max_sendable_transparent(&w, 1);
+    let max = max_sendable_transparent(Chain::Pivx, &w, 1);
 
     assert_eq!(
         max + build(utxos, &recipients(max)).unwrap().fee,
@@ -134,7 +135,7 @@ fn delegated_and_immature_coins_are_not_offered() {
     let w = wallet_with(utxos.clone());
 
     let naive: u64 = w.unspent_utxos.iter().map(|u| u.amount).sum();
-    let max = max_sendable_transparent(&w, 1);
+    let max = max_sendable_transparent(Chain::Pivx, &w, 1);
 
     assert!(max < 10_000_000, "the fee must come out of the one spendable output");
     assert!(
@@ -153,8 +154,8 @@ fn maturity_releases_coins_back_into_the_maximum() {
     let immature = vec![ordinary("a", 0, 10_000_000), coinstake("c", 2, 5_000_000, 100)];
     let mature = vec![ordinary("a", 0, 10_000_000), coinstake("c", 2, 5_000_000, 101)];
 
-    let before = max_sendable_transparent(&wallet_with(immature), 1);
-    let after = max_sendable_transparent(&wallet_with(mature.clone()), 1);
+    let before = max_sendable_transparent(Chain::Pivx, &wallet_with(immature), 1);
+    let after = max_sendable_transparent(Chain::Pivx, &wallet_with(mature.clone()), 1);
 
     assert!(before < 10_000_000, "100 confirmations is one short: still held back");
     assert!(after > 14_000_000, "101 confirmations releases it");
@@ -165,17 +166,17 @@ fn maturity_releases_coins_back_into_the_maximum() {
 /// Nothing to send is 0, not an error and not a negative-shaped underflow.
 #[test]
 fn nothing_spendable_is_zero() {
-    assert_eq!(max_sendable_transparent(&wallet_with(vec![]), 1), 0);
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &wallet_with(vec![]), 1), 0);
 
     let all_delegated = wallet_with(vec![delegated("b", 1, 300_000_000)]);
-    assert_eq!(max_sendable_transparent(&all_delegated, 1), 0);
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &all_delegated, 1), 0);
 
     let all_immature = wallet_with(vec![coinstake("c", 2, 50_000_000, 3)]);
-    assert_eq!(max_sendable_transparent(&all_immature, 1), 0);
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &all_immature, 1), 0);
 
     // A balance the fee would swallow whole.
     let tiny = wallet_with(vec![ordinary("a", 0, 1_000)]);
-    assert_eq!(max_sendable_transparent(&tiny, 1), 0);
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &tiny, 1), 0);
 }
 
 /// A remainder below the dust threshold is unrelayable, so offering it would
@@ -186,11 +187,11 @@ fn a_dust_sized_maximum_is_reported_as_zero() {
     // what survives it is under the 5460 sat dust threshold.
     let w = wallet_with(vec![ordinary("a", 0, 7_000)]);
 
-    assert_eq!(max_sendable_transparent(&w, 1), 0, "a dust maximum must read as nothing sendable");
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &w, 1), 0, "a dust maximum must read as nothing sendable");
 
     // Confirm the premise: had we offered it, the builder would have refused.
     let spendable = w.get_transparent_balance();
-    let fee = estimate_raw_transparent_fee_to_many(&w, &recipients(1_000)).unwrap();
+    let fee = estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients(1_000)).unwrap();
     assert!(spendable > fee, "the fee alone must not have swallowed the balance");
     assert!(spendable - fee < 5_460, "the remainder must genuinely be dust");
 }
@@ -202,8 +203,8 @@ fn more_recipients_lower_the_maximum() {
     let utxos = vec![ordinary("a", 0, 10_000_000), ordinary("b", 1, 3_000_000)];
     let w = wallet_with(utxos.clone());
 
-    let one = max_sendable_transparent(&w, 1);
-    let four = max_sendable_transparent(&w, 4);
+    let one = max_sendable_transparent(Chain::Pivx, &w, 1);
+    let four = max_sendable_transparent(Chain::Pivx, &w, 4);
     assert!(four < one, "four recipients cost more to pay than one");
 
     // Split the four-recipient maximum evenly and confirm it builds. The
@@ -220,7 +221,7 @@ fn more_recipients_lower_the_maximum() {
 #[test]
 fn zero_recipients_is_zero() {
     let w = wallet_with(vec![ordinary("a", 0, 10_000_000)]);
-    assert_eq!(max_sendable_transparent(&w, 0), 0);
+    assert_eq!(max_sendable_transparent(Chain::Pivx, &w, 0), 0);
 }
 
 /// The shield variant prices Sapling outputs, so it differs from the
@@ -232,7 +233,7 @@ fn shielding_has_its_own_maximum_and_the_same_filter() {
     let max = max_shieldable_transparent(&w);
     assert!(max > 0);
     assert!(max < 10_000_000, "delegated coins must not be shieldable either");
-    assert_ne!(max, max_sendable_transparent(&w, 1), "a shielding fee is not a transparent one");
+    assert_ne!(max, max_sendable_transparent(Chain::Pivx, &w, 1), "a shielding fee is not a transparent one");
 }
 
 /// Uneconomical inputs make the figure conservative, never optimistic: the
@@ -242,7 +243,7 @@ fn a_wallet_full_of_tiny_outputs_still_builds() {
     let mut utxos = vec![ordinary("a", 0, 10_000_000)];
     utxos.extend((0..40).map(|i| ordinary("b", i, 2_000)));
 
-    let max = max_sendable_transparent(&wallet_with(utxos.clone()), 1);
+    let max = max_sendable_transparent(Chain::Pivx, &wallet_with(utxos.clone()), 1);
     assert!(max > 0);
     build(utxos, &recipients(max))
         .expect("a maximum computed over uneconomical inputs must still build");

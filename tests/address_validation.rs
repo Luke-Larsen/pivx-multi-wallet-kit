@@ -7,6 +7,7 @@
 //! anything that happened to decode to 25 bytes was treated as a spendable
 //! PIVX P2PKH destination.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::params::PIVX_PUBKEY_PREFIX;
 use ripemd::Ripemd160;
@@ -16,7 +17,7 @@ const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 fn valid_address() -> String {
-    keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 /// Base58Check-encode a 21-byte version+hash payload.
@@ -42,7 +43,7 @@ fn decode_raw(address: &str) -> Vec<u8> {
 #[test]
 fn accepts_a_valid_address() {
     let addr = valid_address();
-    let script = keys::address_to_p2pkh_script(&addr).expect("valid address must be accepted");
+    let script = keys::address_to_p2pkh_script(Chain::Pivx, &addr).expect("valid address must be accepted");
 
     assert_eq!(script.len(), 25);
     assert_eq!(&script[..3], &[0x76, 0xa9, 0x14]); // OP_DUP OP_HASH160 PUSH20
@@ -56,7 +57,7 @@ fn accepts_a_valid_address() {
 #[test]
 fn rejects_a_single_byte_payload_typo() {
     let addr = valid_address();
-    let good_script = keys::address_to_p2pkh_script(&addr).unwrap();
+    let good_script = keys::address_to_p2pkh_script(Chain::Pivx, &addr).unwrap();
 
     // Flip one bit in each payload byte in turn; every one must be rejected.
     for i in 1..21 {
@@ -64,7 +65,7 @@ fn rejects_a_single_byte_payload_typo() {
         raw[i] ^= 0x01;
         let typo = b58_raw(&raw);
 
-        match keys::address_to_p2pkh_script(&typo) {
+        match keys::address_to_p2pkh_script(Chain::Pivx, &typo) {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
@@ -93,7 +94,7 @@ fn rejects_a_checksum_only_typo() {
         raw[i] ^= 0xff;
         let corrupted = b58_raw(&raw);
         assert!(
-            keys::address_to_p2pkh_script(&corrupted).is_err(),
+            keys::address_to_p2pkh_script(Chain::Pivx, &corrupted).is_err(),
             "byte {i}: a corrupted checksum must be rejected"
         );
     }
@@ -109,7 +110,7 @@ fn rejects_pivx_p2sh_address() {
     payload.extend_from_slice(&pkh);
     let p2sh = b58check(&payload);
 
-    let err = keys::address_to_p2pkh_script(&p2sh)
+    let err = keys::address_to_p2pkh_script(Chain::Pivx, &p2sh)
         .expect_err("a P2SH address must not be built as P2PKH")
         .to_string();
     assert!(
@@ -133,7 +134,7 @@ fn rejects_addresses_from_other_networks() {
         payload.extend_from_slice(&pkh);
         let foreign = b58check(&payload);
         assert!(
-            keys::address_to_p2pkh_script(&foreign).is_err(),
+            keys::address_to_p2pkh_script(Chain::Pivx, &foreign).is_err(),
             "version byte {version:#04x} must be rejected"
         );
     }
@@ -149,7 +150,7 @@ fn accepts_only_the_pivx_pubkey_version_byte() {
     for version in 0u8..=255 {
         let mut payload = vec![version];
         payload.extend_from_slice(&pkh);
-        if keys::address_to_p2pkh_script(&b58check(&payload)).is_ok() {
+        if keys::address_to_p2pkh_script(Chain::Pivx, &b58check(&payload)).is_ok() {
             accepted.push(version);
         }
     }
@@ -177,7 +178,7 @@ fn rejects_malformed_input_without_panicking() {
     ];
     for c in cases {
         assert!(
-            keys::address_to_p2pkh_script(c).is_err(),
+            keys::address_to_p2pkh_script(Chain::Pivx, c).is_err(),
             "expected an error for input {c:?}"
         );
     }
@@ -190,7 +191,7 @@ fn rejects_malformed_input_without_panicking() {
 fn accepts_well_formed_address_with_zero_hash() {
     let mut payload = vec![PIVX_PUBKEY_PREFIX];
     payload.extend_from_slice(&[0u8; 20]);
-    assert!(keys::address_to_p2pkh_script(&b58check(&payload)).is_ok());
+    assert!(keys::address_to_p2pkh_script(Chain::Pivx, &b58check(&payload)).is_ok());
 }
 
 /// Round-trip: a script built from a derived key's hash must match the script
@@ -203,8 +204,8 @@ fn script_matches_hash_of_the_derived_pubkey() {
 
     for index in [0u32, 1, 5, 99] {
         let (address, pubkey, _priv) =
-            keys::transparent_key_from_bip39_seed(&seed, 0, index).unwrap();
-        let script = keys::address_to_p2pkh_script(&address).unwrap();
+            keys::transparent_key_from_bip39_seed(Chain::Pivx, &seed, 0, index).unwrap();
+        let script = keys::address_to_p2pkh_script(Chain::Pivx, &address).unwrap();
         let expected = Ripemd160::digest(Sha256::digest(&pubkey));
         assert_eq!(
             &script[3..23],

@@ -2,6 +2,7 @@
 
 use crate::fees;
 use crate::keys::{self, GenericAddress};
+use crate::params::Chain;
 use crate::sapling::prover::SaplingProver;
 use crate::sapling::sync::DEPTH;
 use crate::wallet::{SerializedNote, WalletData};
@@ -198,14 +199,14 @@ fn resolve_shield_recipients(
                 // P2SH destination is measured as P2SH rather than assumed to
                 // be P2PKH.
                 let script_len = addr.script().0.len();
-                if fees::is_dust(r.amount, script_len) {
+                if fees::is_dust(Chain::Pivx, r.amount, script_len) {
                     return Err(format!(
                         "Recipient {} is below the dust threshold: {} sat, minimum {} sat. A \
                          transaction containing a dust output is non-standard and will not \
                          relay.",
                         r.address,
                         r.amount,
-                        fees::dust_threshold(script_len)
+                        fees::dust_threshold(Chain::Pivx, script_len)
                     )
                     .into());
                 }
@@ -287,7 +288,7 @@ pub fn max_shield_spendable(wallet: &WalletData, to_address: &str) -> u64 {
             // Same dust rule the builder now applies to a transparent recipient
             // of a shield send: below the threshold the send would be refused,
             // so offering the figure would be offering an unbuildable amount.
-            if max < fees::dust_threshold(addr.script().0.len()) {
+            if max < fees::dust_threshold(Chain::Pivx, addr.script().0.len()) {
                 return 0;
             }
             max

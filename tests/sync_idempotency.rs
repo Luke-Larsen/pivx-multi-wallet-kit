@@ -10,6 +10,7 @@
 //! it, so a caller syncing from `last_block + 1` re-fetched and re-applied the
 //! whole range from the checkpoint on every sync after the first.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::sapling::sync::{HandleBlocksResult, ShieldBlock, apply_blocks_to_wallet};
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::wallet::{self, WalletData};
@@ -44,7 +45,7 @@ fn tree_size(hex: &str) -> usize {
 }
 
 fn synced_wallet() -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     wallet::reset_to_checkpoint(&mut w).unwrap();
     w
 }

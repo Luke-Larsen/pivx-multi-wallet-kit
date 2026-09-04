@@ -18,6 +18,7 @@
 mod common;
 use common::{decode, split_script_sig, verify_with_prevouts};
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
 use pivx_wallet_kit::transparent::coldstake::{
@@ -54,13 +55,13 @@ fn delegated_utxo(letter: &str, vout: u32, amount: u64, change: u32, index: u32)
 }
 
 fn wallet_with(utxos: Vec<SerializedUTXO>) -> WalletData {
-    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut w = wallet::import_wallet(Chain::Pivx, TEST_MNEMONIC, 5_000_000).unwrap();
     w.unspent_utxos = utxos;
     w
 }
 
 fn to_address() -> String {
-    keys::get_transparent_address(TEST_MNEMONIC).unwrap()
+    keys::get_transparent_address(Chain::Pivx, TEST_MNEMONIC).unwrap()
 }
 
 // --- tests ------------------------------------------------------------------
@@ -136,7 +137,7 @@ fn ordinary_spends_do_not_carry_the_selector() {
         height: 5_000_000,
         ..Default::default()
     };
-    let result = create_raw_transparent_transaction_from_utxos_to_many(
+    let result = create_raw_transparent_transaction_from_utxos_to_many(Chain::Pivx, 
         &seed(),
         0,
         0,
@@ -285,7 +286,7 @@ fn altering_a_withdrawal_invalidates_it() {
 fn withdrawal_fee_exceeds_the_p2pkh_equivalent() {
     for n in 1..=4usize {
         let cold = estimate_coldstake_withdrawal_fee(n);
-        let p2pkh = pivx_wallet_kit::fees::estimate_raw_transparent_fee(n, 2);
+        let p2pkh = pivx_wallet_kit::fees::estimate_raw_transparent_fee(Chain::Pivx, n, 2);
         assert!(cold > p2pkh, "{n} inputs: {cold} should exceed {p2pkh}");
         // Exactly one extra byte per input, at 10 sat/byte.
         assert_eq!(cold - p2pkh, (n as u64) * 10);

@@ -7,6 +7,7 @@
 //! Prints the matching D-address and the base64 signature, in PIVX Core
 //! `signmessage` byte format.
 
+use pivx_wallet_kit::params::Chain;
 use pivx_wallet_kit::{keys, messages};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,9 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let parsed = bip39::Mnemonic::parse_normalized(&mnemonic)?;
     let bip39_seed = parsed.to_seed("");
-    let (address, _pubkey, privkey) = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0)?;
+    let (address, _pubkey, privkey) = keys::transparent_key_from_bip39_seed(Chain::Pivx, &bip39_seed, 0, 0)?;
 
-    let signature = messages::sign_message(&privkey, &message)?;
+    let signature = messages::sign_message(Chain::Pivx, &privkey, &message)?;
     println!("{} {}", address, signature);
     Ok(())
 }
