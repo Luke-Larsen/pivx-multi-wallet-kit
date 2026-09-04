@@ -1,4 +1,4 @@
-//! Shielded transaction builder — spend notes, produce signed v3 tx hex.
+//! Shielded transaction builder: spend notes, produce signed v3 tx hex.
 
 use crate::fees;
 use crate::keys::{self, GenericAddress};
@@ -37,7 +37,7 @@ pub struct ShieldSelection {
 
 /// Pick which shield notes to spend.
 ///
-/// Selection order is **non-memo first, then ascending value** —
+/// Selection order is **non-memo first, then ascending value**:
 /// matches `create_shield_transaction`'s spend order. The estimator
 /// (`Wallet.estimateSendShieldFee`) uses the same function, so a
 /// fee returned by the estimator is the fee a follow-up
@@ -90,6 +90,259 @@ pub fn select_shield_notes(
     .into())
 }
 
+/// One recipient of a shield-sourced send.
+///
+/// `address` may be either a shield (`ps1...`) or transparent (`D...`)
+/// address: a single transaction can pay a mix of both, since the funds come
+/// from shield notes either way.
+///
+/// `memo` is only meaningful for shield destinations; PIVX has nowhere to put
+/// a memo on a transparent output, so a non-empty memo alongside a transparent
+/// address is rejected rather than silently dropped.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct ShieldRecipient {
+    pub address: String,
+    #[tsify(type = "bigint")]
+    pub amount: u64,
+    #[serde(default)]
+    pub memo: String,
+}
+
+/// Recipients split by destination pool, with the output counts the fee model
+/// needs.
+struct ResolvedShieldOutputs {
+    /// `(address, amount, encoded memo)` in caller order.
+    ///
+    /// Memos are encoded here rather than in the builder so that a memo which
+    /// cannot be encoded is rejected at resolution time, which means the fee
+    /// estimator rejects it too, instead of quoting a fee for a send that would
+    /// later fail to build.
+    outputs: Vec<(GenericAddress, u64, MemoBytes)>,
+    transparent_outs: u64,
+    sapling_outs: u64,
+    total_amount: u64,
+}
+
+/// Decode and validate recipients, and work out the output shape for fee
+/// estimation.
+///
+/// The sapling output count is `shield recipients + 1` for change, floored at
+/// 2. The floor matters: a Sapling bundle pads to two outputs with a dummy
+/// note, so a single-shield-output send still pays for two. That floor is what
+/// the previous fixed `(_, 2)` shape encoded, and dropping it would
+/// under-estimate the fee and strand transactions unconfirmed.
+fn resolve_shield_recipients(
+    recipients: &[ShieldRecipient],
+    network: &Network,
+) -> Result<ResolvedShieldOutputs, Box<dyn Error>> {
+    if recipients.is_empty() {
+        return Err("No recipients provided".into());
+    }
+
+    let mut outputs = Vec::with_capacity(recipients.len());
+    let mut transparent_outs = 0u64;
+    let mut shield_outs = 0u64;
+    let mut total_amount = 0u64;
+
+    for r in recipients {
+        if r.amount == 0 {
+            return Err(format!("Recipient {} has a zero amount", r.address).into());
+        }
+        total_amount = total_amount
+            .checked_add(r.amount)
+            .ok_or("Recipient amounts overflow u64")?;
+
+        let decoded = keys::decode_generic_address(&r.address)?;
+        let memo_bytes = match decoded {
+            GenericAddress::Shield(_) => {
+                shield_outs += 1;
+                if r.memo.is_empty() {
+                    MemoBytes::empty()
+                } else {
+                    // Encoding here is the validation: a Sapling memo field is
+                    // 512 bytes, and the limit is on encoded *bytes*, so a
+                    // short string of multi-byte characters can still overflow
+                    // it. Rejecting at resolution keeps the estimator and the
+                    // builder in agreement about what is sendable.
+                    Memo::from_str(&r.memo)
+                        .map_err(|e| {
+                            format!(
+                                "Invalid memo for recipient {} ({} bytes): {}",
+                                r.address,
+                                r.memo.len(),
+                                e
+                            )
+                        })?
+                        .encode()
+                }
+            }
+            GenericAddress::Transparent(ref addr) => {
+                if !r.memo.is_empty() {
+                    return Err(format!(
+                        "Recipient {} is transparent but carries a memo: transparent outputs \
+                         cannot hold memos",
+                        r.address
+                    )
+                    .into());
+                }
+                // A shield-source transaction still emits a real transparent
+                // output, and `IsStandardTx` judges it by the same rule: dust
+                // in `vout` makes the whole transaction non-standard, so no
+                // node relays it, whatever the inputs were. The transparent
+                // builders reject this at `resolve_outputs`; without the same
+                // check here a shield send is the one way to build an
+                // unrelayable transaction and only find out at broadcast.
+                //
+                // Sized from the script the builder will actually emit, so a
+                // P2SH destination is measured as P2SH rather than assumed to
+                // be P2PKH.
+                let script_len = addr.script().0.len();
+                if fees::is_dust(r.amount, script_len) {
+                    return Err(format!(
+                        "Recipient {} is below the dust threshold: {} sat, minimum {} sat. A \
+                         transaction containing a dust output is non-standard and will not \
+                         relay.",
+                        r.address,
+                        r.amount,
+                        fees::dust_threshold(script_len)
+                    )
+                    .into());
+                }
+                transparent_outs += 1;
+                MemoBytes::empty()
+            }
+        };
+        outputs.push((decoded, r.amount, memo_bytes));
+    }
+
+    debug_assert_eq!(
+        network.hrp_sapling_payment_address(),
+        Network::MainNetwork.hrp_sapling_payment_address(),
+        "shield recipient resolution assumes mainnet HRPs"
+    );
+
+    Ok(ResolvedShieldOutputs {
+        outputs,
+        transparent_outs,
+        sapling_outs: sapling_out_count(shield_outs),
+        total_amount,
+    })
+}
+
+/// Sapling outputs the builder is charged for, given `shield_outs` recipients.
+///
+/// Two adjustments, both of which a fee estimate has to make or it will quote
+/// less than the transaction costs:
+///
+///  * **Plus one for change.** Any remainder returns as a shield note, and that
+///    note is an output like any other. A max send is the one case that emits
+///    none, so it over-pays by one output's worth; that is the direction that
+///    keeps the figure buildable.
+///  * **At least two.** The Sapling builder pads a bundle out to two outputs,
+///    so a send with no shield recipients at all still carries two.
+///
+/// One definition, shared by [`resolve_shield_recipients`] and
+/// [`max_shield_spendable_to_many`], so an estimate cannot drift from what the
+/// builder charges.
+fn sapling_out_count(shield_outs: u64) -> u64 {
+    (shield_outs + 1).max(2)
+}
+
+/// Sum of every note's value, or `None` if any of them cannot be read.
+///
+/// `None` rather than a partial total on purpose: [`select_shield_notes`]
+/// errors on an unreadable note, so a wallet holding one cannot build at all,
+/// and reporting a spendable figure against it would offer an amount the
+/// builder then refuses.
+fn total_note_value(notes: &[SerializedNote]) -> Option<u64> {
+    notes.iter().try_fold(0u64, |acc, n| {
+        let value = n.note.get("value").and_then(|v| v.as_u64())?;
+        acc.checked_add(value)
+    })
+}
+
+/// Largest amount a shield-source send can pay to `to_address` after fee.
+///
+/// The shield counterpart to
+/// [`crate::transparent::builder::max_sendable_transparent`], and the answer to
+/// "empty my shield balance". Both branches of `maxSendableSat` compute from
+/// *transparent* UTXOs (a `ps1…` destination there prices a shielding send), so
+/// before this there was no accessor for spending notes and callers had to
+/// solve `shieldBalanceSat - estimateSendShieldFee` by hand. Amount and fee are
+/// mutually dependent, because the fee grows with the number of notes selection
+/// reaches for, which is exactly the arithmetic that produces off-by-one errors.
+///
+/// Returns 0 when nothing can be sent: no notes, a fee that swallows the
+/// balance, a note whose value cannot be read, an unparseable destination, or a
+/// remainder that would be dust at a transparent destination. A UI can treat 0
+/// as "disable the control".
+///
+/// Routes on the destination, since a transparent recipient adds a transparent
+/// output to the fee model and a shield one adds a Sapling output.
+pub fn max_shield_spendable(wallet: &WalletData, to_address: &str) -> u64 {
+    match keys::decode_generic_address(to_address) {
+        Ok(GenericAddress::Transparent(addr)) => {
+            let max = max_shield_spendable_to_many(wallet, 1, 0);
+            // Same dust rule the builder now applies to a transparent recipient
+            // of a shield send: below the threshold the send would be refused,
+            // so offering the figure would be offering an unbuildable amount.
+            if max < fees::dust_threshold(addr.script().0.len()) {
+                return 0;
+            }
+            max
+        }
+        Ok(GenericAddress::Shield(_)) => max_shield_spendable_to_many(wallet, 0, 1),
+        Err(_) => 0,
+    }
+}
+
+/// Largest *total* a shield-source send to the given recipient shape can pay.
+///
+/// Split the result across recipients however you like, as long as the parts
+/// sum to it and each transparent part clears its dust threshold.
+///
+/// Spends every note, so the fee is priced for all of them. Selection may still
+/// stop short of that if the remaining notes are worth less than the 384,000 sat
+/// each one adds to the fee, in which case the leftover simply returns as
+/// change; the amount is paid either way, which is what the figure promises.
+pub fn max_shield_spendable_to_many(
+    wallet: &WalletData,
+    transparent_outs: u64,
+    shield_outs: u64,
+) -> u64 {
+    if wallet.unspent_notes.is_empty() || transparent_outs + shield_outs == 0 {
+        return 0;
+    }
+    let Some(total) = total_note_value(&wallet.unspent_notes) else {
+        return 0;
+    };
+    let fee = fees::estimate_fee(
+        0,
+        transparent_outs,
+        wallet.unspent_notes.len() as u64,
+        sapling_out_count(shield_outs),
+    );
+    total.saturating_sub(fee)
+}
+
+/// The `(transparent_outs, sapling_outs, recipient_total)` a recipient list
+/// implies, for callers that need to estimate a fee without building.
+///
+/// Exposed so the fee estimator and the builder derive the output shape from
+/// the same code. A fee returned against this shape is exactly what
+/// [`create_shield_transaction_to_many`] will charge for the same recipients.
+pub fn shield_recipient_fee_shape(
+    recipients: &[ShieldRecipient],
+) -> Result<(u64, u64, u64), Box<dyn Error>> {
+    let resolved = resolve_shield_recipients(recipients, &Network::MainNetwork)?;
+    Ok((
+        resolved.transparent_outs,
+        resolved.sapling_outs,
+        resolved.total_amount,
+    ))
+}
+
 /// Result of building a shield transaction.
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
@@ -112,24 +365,53 @@ pub fn create_shield_transaction(
     block_height: u32,
     prover: &SaplingProver,
 ) -> Result<TransactionResult, Box<dyn Error>> {
+    create_shield_transaction_to_many(
+        wallet,
+        &[ShieldRecipient {
+            address: to_address.to_string(),
+            amount,
+            memo: memo.to_string(),
+        }],
+        block_height,
+        prover,
+    )
+}
+
+/// Multi-recipient form of [`create_shield_transaction`]: spend the wallet's
+/// notes across any number of destinations in one transaction.
+///
+/// Recipients may mix shield (`ps1...`) and transparent (`D...`) addresses
+/// freely: the funds come from shield notes either way, so unlike the
+/// transparent builders there is no need to split the send. Each shield
+/// recipient may carry its own memo.
+///
+/// Outputs are added in the order given, with shield change appended last.
+/// `TransactionResult::amount` is the recipient total, excluding change and
+/// fee.
+///
+/// `prover` must be supplied by the caller (see
+/// [`crate::sapling::prover::verify_and_load_params`]). `block_height` should
+/// be the chain tip + 1, fetched by the consumer.
+pub fn create_shield_transaction_to_many(
+    wallet: &mut WalletData,
+    recipients: &[ShieldRecipient],
+    block_height: u32,
+    prover: &SaplingProver,
+) -> Result<TransactionResult, Box<dyn Error>> {
     let extsk = wallet.derive_extsk()?;
     let network = Network::MainNetwork;
 
-    let (transparent_output_count, sapling_output_count) =
-        if to_address.starts_with(network.hrp_sapling_payment_address()) {
-            (0u64, 2u64)
-        } else {
-            (1u64, 2u64)
-        };
+    let resolved = resolve_shield_recipients(recipients, &network)?;
+    let amount = resolved.total_amount;
 
     // Single source of truth for which notes to spend and what fee
-    // to charge — shared with `Wallet.estimateSendShieldFee` so the
+    // to charge: shared with `Wallet.estimateSendShieldFee` so the
     // estimator and the builder never disagree.
     let selection = select_shield_notes(
         &wallet.unspent_notes,
         amount,
-        transparent_output_count,
-        sapling_output_count,
+        resolved.transparent_outs,
+        resolved.sapling_outs,
     )?;
     let total = selection.total;
     let fee = selection.fee;
@@ -182,28 +464,36 @@ pub fn create_shield_transaction(
         nullifiers.push(crate::simd::hex::bytes_to_hex_string(&nullifier.to_vec()));
     }
 
-    let send_amount = Zatoshis::from_u64(amount).map_err(|_| "Invalid amount")?;
-    let change_amount =
-        Zatoshis::from_u64(total - amount - fee).map_err(|_| "Invalid change")?;
+    // `select_shield_notes` guarantees total >= amount + fee, so this cannot
+    // underflow, but it is subtraction on caller-influenced values, so keep
+    // it checked rather than relying on that invariant holding forever.
+    let change_amount = total
+        .checked_sub(amount)
+        .and_then(|v| v.checked_sub(fee))
+        .ok_or("Selected notes do not cover amount plus fee")?;
+    let change_amount = Zatoshis::from_u64(change_amount).map_err(|_| "Invalid change")?;
 
-    let to = keys::decode_generic_address(to_address)?;
-    match to {
-        GenericAddress::Transparent(addr) => {
-            builder
-                .add_transparent_output(&addr, send_amount)
-                .map_err(|e| format!("Failed to add transparent output: {:?}", e))?;
-        }
-        GenericAddress::Shield(addr) => {
-            let memo_bytes = if memo.is_empty() {
-                MemoBytes::empty()
-            } else {
-                Memo::from_str(memo)
-                    .map_err(|e| format!("Invalid memo: {}", e))?
-                    .encode()
-            };
-            builder
-                .add_sapling_output::<FeeRule>(None, addr, send_amount, memo_bytes)
-                .map_err(|_| "Failed to add sapling output")?;
+    for (addr, out_amount, memo_bytes) in &resolved.outputs {
+        let send_amount = Zatoshis::from_u64(*out_amount).map_err(|_| "Invalid amount")?;
+        match addr {
+            GenericAddress::Transparent(addr) => {
+                builder
+                    .add_transparent_output(addr, send_amount)
+                    .map_err(|e| format!("Failed to add transparent output: {:?}", e))?;
+            }
+            GenericAddress::Shield(addr) => {
+                // Memo already validated and encoded by
+                // `resolve_shield_recipients`, so there is nothing here that
+                // can fail differently from what the estimator saw.
+                builder
+                    .add_sapling_output::<FeeRule>(
+                        None,
+                        *addr,
+                        send_amount,
+                        memo_bytes.clone(),
+                    )
+                    .map_err(|_| "Failed to add sapling output")?;
+            }
         }
     }
 
@@ -253,7 +543,7 @@ mod tests {
     use crate::wallet::SerializedNote;
 
     /// Build a SerializedNote whose JSON `note` field carries the given
-    /// `value`. The other fields are placeholders — `select_shield_notes`
+    /// `value`. The other fields are placeholders: `select_shield_notes`
     /// only reads `note["value"]` and `memo`, so this is sufficient.
     fn note(value: u64, memo: Option<&str>) -> SerializedNote {
         SerializedNote {
@@ -276,7 +566,7 @@ mod tests {
     #[test]
     fn insufficient_balance_returns_error() {
         let notes = vec![note(50, None), note(30, None)];
-        // 80 sat available, requesting 1000 — fee ~2 KB at 1000 sat/byte
+        // 80 sat available, requesting 1000: fee ~2 KB at 1000 sat/byte
         // dwarfs balance regardless of selection.
         let result = select_shield_notes(&notes, 1000, 0, 2);
         assert!(result.is_err());
