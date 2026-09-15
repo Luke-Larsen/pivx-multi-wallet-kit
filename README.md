@@ -33,7 +33,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 
 | Module                          | Purpose                                                                    |
 |---------------------------------|----------------------------------------------------------------------------|
-| `params`                        | `Chain` (`Pivx`/`Litecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate — plus the PIVX-only Sapling param SHA256 hashes |
+| `params`                        | `Chain` (`Pivx`/`Litecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate, plus the PIVX-only Sapling param SHA256 hashes |
 | `base58check`                   | Base58Check codec shared by both chains' P2PKH addressing               |
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
 | `checkpoints`                   | Embedded PIVX mainnet checkpoint data for fast initial Sapling sync *(PIVX-only)* |
@@ -59,7 +59,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (311 total: 18 unit + 293 integration, many against real
+# Tests (318 total: 18 unit + 300 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
