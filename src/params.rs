@@ -108,10 +108,22 @@ pub const PIVX: ChainParams = ChainParams {
 
 /// Litecoin mainnet transparent-chain constants.
 ///
-/// `coinbase_maturity`, `fee_per_byte`, and `dust_relay_fee` are carried over
-/// from Litecoin Core's `chainparams.cpp`/`policy.h` defaults; reconfirm
-/// against a current node before relying on them for production fee/maturity
-/// decisions, since policy defaults can move independently of consensus.
+/// Each value below was read from Litecoin Core master, not inferred from
+/// Bitcoin. That distinction matters: Litecoin keeps Bitcoin's relay floor but
+/// not its dust rate, so a constant that looks reasonable next to Bitcoin's can
+/// still be wrong by a factor of ten. Sources, in order:
+///
+/// * `coin_type`: SLIP-44 2.
+/// * `pubkey_prefix`: `PUBKEY_ADDRESS` 48 in `chainparams.cpp`.
+/// * `coinbase_maturity`: `COINBASE_MATURITY` in `consensus/consensus.h`.
+/// * `msg_magic`: `MESSAGE_MAGIC` in `util/message.cpp`.
+/// * `fee_per_byte`: 10 sat/B is 10,000 sat/kB, matching the wallet default
+///   `DEFAULT_TRANSACTION_MINFEE` and clearing the 1,000 sat/kB
+///   `DEFAULT_MIN_RELAY_TX_FEE` floor in `validation.h` ten times over.
+/// * `dust_relay_fee`: `DUST_RELAY_TX_FEE` in `policy/policy.h`, which is
+///   30,000, the same as PIVX. Bitcoin's is 3,000. Pinned by
+///   `tests/litecoin_dust_threshold.rs`, because using Bitcoin's value here
+///   builds change outputs a Litecoin node rejects as dust.
 pub const LITECOIN: ChainParams = ChainParams {
     coin_type: 2,
     pubkey_prefix: 0x30,
@@ -119,7 +131,7 @@ pub const LITECOIN: ChainParams = ChainParams {
     coinbase_maturity: 100,
     msg_magic: "Litecoin Signed Message:\n",
     fee_per_byte: 10,
-    dust_relay_fee: 3_000,
+    dust_relay_fee: 30_000,
 };
 
 impl Chain {
