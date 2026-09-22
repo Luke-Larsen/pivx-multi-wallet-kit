@@ -1,18 +1,32 @@
-# PIVX Wallet Kit
-
-[![CI](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@pivx-labs/pivx-wallet-kit?color=cb3837&logo=npm)](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit)
+# Multi Wallet Kit
 
 Pure-Rust wallet primitives for [PIVX](https://pivx.org) (transparent + Sapling shield) and
 [Litecoin](https://litecoin.org) (transparent only).
 
-Designed as the shared core that powers PIVX wallet clients (native CLIs, MCP servers, desktop apps, and embeddable web wallets) from a single audited codebase.
+Designed as the shared core that powers wallet clients (native CLIs, MCP servers, desktop apps, and embeddable web wallets) from a single audited codebase.
+
+## This is a multi-chain fork
+
+This repository is a fork of [PIVX-Labs/pivx-wallet-kit](https://github.com/PIVX-Labs/pivx-wallet-kit). Upstream is, and is meant to be, a PIVX wallet kit. This fork exists to support **more than one chain** through a shared `Chain` parameter, and Litecoin is the first of them.
+
+|                                  | [Upstream](https://github.com/PIVX-Labs/pivx-wallet-kit) | This fork |
+|----------------------------------|-----------|-----------|
+| PIVX transparent, Sapling shield, cold staking | yes | yes, unchanged |
+| Litecoin (transparent only)      | no  | yes |
+| Chain selection                  | n/a | `Chain::Pivx` / `Chain::Litecoin` on one code path |
+| Published to npm                 | [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit) | not published; consume from git |
+
+**Which should you use?** If you are building a PIVX-only wallet, use upstream: it is the canonical kit, it is published to npm, and nothing here improves PIVX behaviour. Use this fork if you need Litecoin, or another transparent chain later, from the same library and the same seed.
+
+The PIVX surface is deliberately kept in step with upstream rather than diverging. Every chain-specific value moved behind `Chain`, and PIVX's constants, fee model and transaction formats are byte-for-byte what they were; the test suite exists in large part to prove that. Sapling shielding and pay-to-cold-staking remain PIVX-only by construction, because no other chain here has an equivalent to generalize.
+
+Litecoin support is **transparent-only**: no shielded pool, no cold staking, no staking addresses. Those are not omissions to be filled in later, they are features Litecoin does not have.
 
 ## Why
 
-Every PIVX wallet reinvents the same primitives: BIP39 seeds, BIP44 derivation, address encoding, transparent tx construction, Sapling note management, shielded tx building. Each reimplementation is a new surface for subtle bugs and divergent behaviour between clients.
+Every wallet reinvents the same primitives: BIP39 seeds, BIP44 derivation, address encoding, transparent tx construction, Sapling note management, shielded tx building. Each reimplementation is a new surface for subtle bugs and divergent behaviour between clients. Supporting a second chain usually means a second copy of all of it.
 
-PIVX Wallet Kit consolidates that core into one library:
+Multi Wallet Kit consolidates that core into one library:
 
 - **No I/O, no network, no filesystem.** The kit is pure logic. Consumers provide block data, current heights, proving-parameter bytes, and their own encryption keys.
 - **Native + WASM.** Compiles to x86_64, aarch64, and `wasm32-unknown-unknown`, so the same code runs in [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) on a server and in a browser wallet with zero logic drift.
@@ -26,7 +40,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
         │
         ├── native → pivx-agent-kit (CLI + MCP server, HTTP, disk)
         │
-        └── WASM   → embeddable web wallets (npm @pivx-labs/pivx-wallet-kit)
+        └── WASM   → embeddable web wallets (built with wasm-pack)
 ```
 
 ## Modules
@@ -35,6 +49,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 |---------------------------------|----------------------------------------------------------------------------|
 | `params`                        | `Chain` (`Pivx`/`Litecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate, plus the PIVX-only Sapling param SHA256 hashes |
 | `base58check`                   | Base58Check codec shared by both chains' P2PKH addressing               |
+| `address`                       | Destination decoding: P2PKH on both chains, plus P2SH and bech32 segwit where the chain has them |
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
 | `checkpoints`                   | Embedded PIVX mainnet checkpoint data for fast initial Sapling sync *(PIVX-only)* |
 | `keys`                          | `Chain`-parameterized BIP32/BIP44 derivation and transparent address encoding, plus PIVX-only Sapling ZIP32 keys |
@@ -59,12 +74,14 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (318 total: 18 unit + 300 integration, many against real
+# Tests (339 total: 20 unit + 319 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
 
-The native `rlib` is what downstream Rust consumers (e.g. `pivx-agent-kit`) depend on. The `wasm32-unknown-unknown` `cdylib` is the target for web wallets, distributed via npm as [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit).
+The native `rlib` is what downstream Rust consumers (e.g. `pivx-agent-kit`) depend on. The `wasm32-unknown-unknown` `cdylib` is the target for web wallets.
+
+This fork is **not published to npm**: [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit) is upstream's package and does not contain the Litecoin work. Consume this fork from git, and pin a commit.
 
 ### Parallel proving (`multicore`)
 
@@ -96,7 +113,7 @@ Add the kit to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit" }
+pivx-wallet-kit = { git = "https://github.com/Luke-Larsen/pivx-multi-wallet-kit" }
 ```
 
 ```rust
@@ -194,6 +211,7 @@ wallet.applyBlocks(blocks);
 const shieldSat = wallet.shieldBalanceSat();
 
 // Build a transparent → transparent tx (no prover required).
+// toAddress may be L..., M..., 3... or ltc1...
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
 // Pay several transparent recipients from one transaction. Recipients are
@@ -247,13 +265,39 @@ localStorage.setItem('wallet', encrypted);
 
 ### Litecoin support
 
-Litecoin support is **transparent-only**: BIP44 key derivation, legacy P2PKH addresses
-(`L...`, Base58Check version byte `0x30`), raw v1 transaction building/signing, fee
-estimation, and message signing. There is no Litecoin equivalent of Sapling shielding or
-PIVX's pay-to-cold-staking, so neither exists on a Litecoin wallet: calling a `shield*` or
-`*ColdStake*` method on one returns an error (or, for read-only balance getters, `0`/empty
-rather than an error, so a generic dashboard can call them unconditionally). Bech32/SegWit
-(`ltc1...`) addresses are not yet supported.
+Litecoin support is **transparent-only**: BIP44 key derivation, raw v1 transaction
+building/signing, fee estimation, and message signing. There is no Litecoin equivalent of
+Sapling shielding or PIVX's pay-to-cold-staking, so neither exists on a Litecoin wallet:
+calling a `shield*` or `*ColdStake*` method on one returns an error (or, for read-only
+balance getters, `0`/empty rather than an error, so a generic dashboard can call them
+unconditionally).
+
+#### Address forms
+
+The kit **receives** at legacy P2PKH addresses (`L...`, Base58Check version `0x30`): every
+key it derives is a pubkey hash, and every input it signs is P2PKH.
+
+It **pays** every form a Litecoin node will pay:
+
+| Destination | Form | scriptPubKey | Size |
+|---|---|---|---|
+| `L...` | P2PKH | `OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG` | 25 B |
+| `M...` / `3...` | P2SH | `OP_HASH160 <20> OP_EQUAL` | 23 B |
+| `ltc1q...` (20-byte program) | P2WPKH | `OP_0 <20>` | 22 B |
+| `ltc1q...` (32-byte program) | P2WSH | `OP_0 <32>` | 34 B |
+
+This matters in practice because exchange deposit addresses and modern wallets' default
+receive addresses are `ltc1...` or `M...`. Paying a script the kit cannot itself spend is
+normal: you are building the recipient's output, and only they need to satisfy it.
+
+Fees and dust thresholds are sized from the real script length rather than assuming P2PKH,
+since a P2WSH output is 9 bytes larger than a P2PKH one and under-paying strands a
+transaction unconfirmed.
+
+Witness **version 0 only**. Litecoin has no taproot, and an unrecognised witness version is
+refused rather than paid, because under current rules such an output is spendable by anyone.
+Addresses belonging to another chain are refused on the same principle: a `bc1...` address
+decodes perfectly and paying it would put Litecoin into a Bitcoin script.
 
 Native Rust callers select the chain by passing `pivx_wallet_kit::params::Chain::Litecoin`
 to `wallet::import_wallet` / `wallet::create_new_wallet` and to every `keys` / `messages` /
@@ -269,6 +313,7 @@ const transparent = wallet.transparentAddress(); // an "L..." address
 const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json()); // any Blockbook-compatible LTC explorer
 wallet.setUtxos(parseBlockbookUtxos(raw));
 
+// toAddress may be L..., M..., 3... or ltc1...
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 const sig = wallet.signMessage('hello');
 console.log(verifyMessageLitecoin(transparent, 'hello', sig));

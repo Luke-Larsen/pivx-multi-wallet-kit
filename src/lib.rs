@@ -33,6 +33,7 @@ pub mod params;
 #[doc(hidden)]
 pub mod simd;
 pub(crate) mod base58check;
+pub mod address;
 pub mod checkpoints;
 pub mod keys;
 pub mod fees;

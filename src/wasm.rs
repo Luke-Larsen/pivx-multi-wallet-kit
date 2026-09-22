@@ -454,7 +454,15 @@ impl Wallet {
         {
             crate::transparent::builder::max_shieldable_transparent(&self.inner)
         } else {
-            crate::transparent::builder::max_sendable_transparent(self.inner.chain, &self.inner, 1)
+            // The destination is in hand, so price it by the script that
+            // actually pays it: a `ltc1q...` or `M...` output is smaller than
+            // the P2PKH the count-based estimator assumes, and a P2WSH one is
+            // larger.
+            crate::transparent::builder::max_sendable_transparent_to(
+                self.inner.chain,
+                &self.inner,
+                &[to_address],
+            )
         }
     }
 

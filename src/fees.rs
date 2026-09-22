@@ -95,3 +95,37 @@ pub fn estimate_raw_transparent_fee_with_extra(
     let est_size = input_count * 150 + output_count * 34 + extra_bytes + 10;
     (est_size as u64) * chain.params().fee_per_byte
 }
+
+/// Serialized size of one output paying `script_len` bytes of script.
+///
+/// 8 bytes of value, the script's length prefix, then the script. The flat
+/// 34-byte figure the count-based estimators use is this for a 25-byte P2PKH
+/// script, so an all-P2PKH transaction prices identically either way.
+#[inline]
+pub const fn output_size(script_len: usize) -> usize {
+    let prefix = if script_len < 0xfd { 1 } else { 3 };
+    8 + prefix + script_len
+}
+
+/// As [`estimate_raw_transparent_fee`], sizing each output by the script that
+/// actually pays it rather than assuming all of them are P2PKH.
+///
+/// Needed once a chain can pay more than one address form. A P2SH output is
+/// 32 bytes and a P2WPKH one 31, both under the flat 34, while a P2WSH output
+/// is 43 and over it. Charging the flat figure for a P2WSH recipient
+/// under-pays, and under-paying is the direction that strands a transaction
+/// unconfirmed, so the difference is not one to round away.
+///
+/// The `extra_bytes` escape hatch on
+/// [`estimate_raw_transparent_fee_with_extra`] cannot express this: it only
+/// adds, and two of the three new forms are smaller than the baseline.
+#[inline]
+pub fn estimate_raw_transparent_fee_for_scripts(
+    chain: Chain,
+    input_count: usize,
+    output_script_lens: &[usize],
+) -> u64 {
+    let outputs: usize = output_script_lens.iter().copied().map(output_size).sum();
+    let est_size = input_count * 150 + outputs + 10;
+    (est_size as u64) * chain.params().fee_per_byte
+}

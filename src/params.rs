@@ -83,6 +83,15 @@ pub struct ChainParams {
     pub coin_type: u32,
     /// Base58Check version byte for a P2PKH address.
     pub pubkey_prefix: u8,
+    /// Base58Check version byte for a P2SH address, and the alternate byte
+    /// where a chain accepts two (Litecoin has both `M...` and the older
+    /// `3...`). `None` on a chain whose builder pays P2PKH only, which keeps
+    /// the address parser refusing P2SH there exactly as it did before.
+    pub p2sh_prefixes: &'static [u8],
+    /// Human-readable part for native segwit (bech32) addresses. `None` on a
+    /// chain without segwit, which makes every `hrp1...` address an error
+    /// rather than something to guess at.
+    pub bech32_hrp: Option<&'static str>,
     /// Base58Check version byte for a cold-staking address. `None` where the
     /// chain has no P2CS opcodes (Litecoin).
     pub staking_prefix: Option<u8>,
@@ -99,6 +108,13 @@ pub struct ChainParams {
 pub const PIVX: ChainParams = ChainParams {
     coin_type: PIVX_COIN_TYPE,
     pubkey_prefix: PIVX_PUBKEY_PREFIX,
+    // PIVX has P2SH addresses, but this kit's builder has never paid one and
+    // adding that is a separate decision with its own testing. Empty here
+    // keeps the parser's behaviour on PIVX byte-for-byte what it was.
+    p2sh_prefixes: &[],
+    // PIVX has no segwit. The `ps1...` prefix that looks bech32-shaped is a
+    // Sapling shielded payment address, routed long before this.
+    bech32_hrp: None,
     staking_prefix: Some(PIVX_STAKING_PREFIX),
     coinbase_maturity: COINBASE_MATURITY,
     msg_magic: "DarkNet Signed Message:\n",
@@ -115,6 +131,13 @@ pub const PIVX: ChainParams = ChainParams {
 ///
 /// * `coin_type`: SLIP-44 2.
 /// * `pubkey_prefix`: `PUBKEY_ADDRESS` 48 in `chainparams.cpp`.
+/// * `p2sh_prefixes`: `SCRIPT_ADDRESS` 5 and `SCRIPT_ADDRESS2` 50, both in
+///   `chainparams.cpp`. Litecoin carries two: 50 produces the `M...` form
+///   modern wallets display, 5 the older `3...` form that collides with
+///   Bitcoin's P2SH. Core accepts both, so both are here. Note Core's naming
+///   makes 5 the primary and 50 the alternate, which reads backwards next to
+///   what wallets actually show.
+/// * `bech32_hrp`: `bech32_hrp` in `chainparams.cpp`.
 /// * `coinbase_maturity`: `COINBASE_MATURITY` in `consensus/consensus.h`.
 /// * `msg_magic`: `MESSAGE_MAGIC` in `util/message.cpp`.
 /// * `fee_per_byte`: 10 sat/B is 10,000 sat/kB, matching the wallet default
@@ -127,6 +150,8 @@ pub const PIVX: ChainParams = ChainParams {
 pub const LITECOIN: ChainParams = ChainParams {
     coin_type: 2,
     pubkey_prefix: 0x30,
+    p2sh_prefixes: &[50, 5],
+    bech32_hrp: Some("ltc"),
     staking_prefix: None,
     coinbase_maturity: 100,
     msg_magic: "Litecoin Signed Message:\n",
