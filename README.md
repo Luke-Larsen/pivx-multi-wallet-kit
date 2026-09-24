@@ -211,7 +211,7 @@ wallet.applyBlocks(blocks);
 const shieldSat = wallet.shieldBalanceSat();
 
 // Build a transparent → transparent tx (no prover required).
-// toAddress may be L..., M..., 3... or ltc1...
+// toAddress may be L..., M... or ltc1...
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
 // Pay several transparent recipients from one transaction. Recipients are
@@ -282,7 +282,7 @@ It **pays** every form a Litecoin node will pay:
 | Destination | Form | scriptPubKey | Size |
 |---|---|---|---|
 | `L...` | P2PKH | `OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG` | 25 B |
-| `M...` / `3...` | P2SH | `OP_HASH160 <20> OP_EQUAL` | 23 B |
+| `M...` | P2SH | `OP_HASH160 <20> OP_EQUAL` | 23 B |
 | `ltc1q...` (20-byte program) | P2WPKH | `OP_0 <20>` | 22 B |
 | `ltc1q...` (32-byte program) | P2WSH | `OP_0 <32>` | 34 B |
 
@@ -299,6 +299,13 @@ refused rather than paid, because under current rules such an output is spendabl
 Addresses belonging to another chain are refused on the same principle: a `bc1...` address
 decodes perfectly and paying it would put Litecoin into a Bitcoin script.
 
+Litecoin's older `3...` P2SH form is **refused**, even though Litecoin Core accepts it. Its
+version byte (5) is byte-identical to Bitcoin's, so a `3...` string carries nothing that says
+which chain it belongs to, and the two sit side by side in every exchange deposit UI. Paying
+one is a coin flip, and the losing side loses the coins permanently. Migrating to `M...` is
+why Litecoin introduced the second prefix in the first place. The error names the equivalent
+`M...` address, so a genuine Litecoin payment is one copy-paste away.
+
 Native Rust callers select the chain by passing `pivx_wallet_kit::params::Chain::Litecoin`
 to `wallet::import_wallet` / `wallet::create_new_wallet` and to every `keys` / `messages` /
 `fees` / `transparent::builder` function that takes a `chain` argument; the wallet then
@@ -313,7 +320,7 @@ const transparent = wallet.transparentAddress(); // an "L..." address
 const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json()); // any Blockbook-compatible LTC explorer
 wallet.setUtxos(parseBlockbookUtxos(raw));
 
-// toAddress may be L..., M..., 3... or ltc1...
+// toAddress may be L..., M... or ltc1...
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 const sig = wallet.signMessage('hello');
 console.log(verifyMessageLitecoin(transparent, 'hello', sig));

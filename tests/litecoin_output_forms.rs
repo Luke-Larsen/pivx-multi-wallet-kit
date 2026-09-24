@@ -70,24 +70,73 @@ fn p2pkh_is_unchanged() {
 }
 
 #[test]
-fn p2sh_accepts_both_of_litecoins_version_bytes() {
-    // Litecoin Core carries SCRIPT_ADDRESS 5 (the older `3...`) and
-    // SCRIPT_ADDRESS2 50 (the `M...` modern wallets show). Both are valid and
-    // both must produce the identical script.
+fn p2sh_pays_litecoins_own_version_byte() {
     let expected: Vec<u8> = [&[0xa9, 0x14][..], &HASH20[..], &[0x87][..]].concat();
 
-    for version in [50u8, 5u8] {
-        let addr = b58check(version, &HASH20);
-        let d = address_to_destination(Chain::Litecoin, &addr)
-            .unwrap_or_else(|e| panic!("version {version} must be accepted: {e}"));
-        assert_eq!(d.kind, OutputKind::P2sh, "version {version}");
-        assert_eq!(d.script, expected, "version {version}");
-        assert_eq!(d.script.len(), 23);
-    }
+    let addr = b58check(50, &HASH20);
+    let d = address_to_destination(Chain::Litecoin, &addr).expect("M... must be accepted");
+    assert_eq!(d.kind, OutputKind::P2sh);
+    assert_eq!(d.script, expected);
+    assert_eq!(d.script.len(), 23);
+    assert!(addr.starts_with('M'), "this is the form wallets display");
+}
 
-    // And the leading characters users actually see.
-    assert!(b58check(50, &HASH20).starts_with('M'));
-    assert!(b58check(5, &HASH20).starts_with('3'));
+/// Regression for the one cross-chain hole the first cut of this module left
+/// open, found by the security review.
+///
+/// Litecoin Core accepts `SCRIPT_ADDRESS = 5` (`3...`) as well as
+/// `SCRIPT_ADDRESS2 = 50` (`M...`), and the first implementation accepted both
+/// because Litecoin does. But 5 is byte-identical to **Bitcoin's**
+/// `SCRIPT_ADDRESS`: same prefix, same 20-byte hash, same checksum, no hrp and
+/// no network tag. A `3...` string carries nothing that says which chain it is
+/// for, which is precisely why Litecoin introduced the `M...` form.
+///
+/// The realistic loss: a user copies the Bitcoin deposit address from an
+/// exchange page instead of the Litecoin one, sitting inches away in the same
+/// UI. It decodes cleanly, prices cleanly, signs cleanly, and the LTC lands at
+/// a script hash the exchange only watches on Bitcoin. Nothing looked wrong at
+/// any point.
+///
+/// Before bech32 support this could not happen, because only version 48 was
+/// accepted. Accepting 5 newly created the hazard, so it is refused by default.
+#[test]
+fn the_ambiguous_legacy_p2sh_form_is_refused() {
+    let addr = b58check(5, &HASH20);
+    assert!(addr.starts_with('3'), "this is the Bitcoin-shaped form");
+
+    let err = address_to_destination(Chain::Litecoin, &addr)
+        .expect_err("a version byte shared with Bitcoin must not be paid on a guess");
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("shares with another chain"),
+        "the error must say why it is refused, not just that it is: {msg}"
+    );
+}
+
+#[test]
+fn refusing_the_ambiguous_form_offers_the_unambiguous_one() {
+    // A dead end would push users toward pasting it somewhere less careful.
+    // The payload is a plain hash160, so the same destination re-encodes
+    // losslessly into Litecoin's own form, and the error names it.
+    let ambiguous = b58check(5, &HASH20);
+    let expected = b58check(50, &HASH20);
+
+    let err = address_to_destination(Chain::Litecoin, &ambiguous).unwrap_err();
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains(&expected),
+        "error should name the {expected} equivalent so the user can act on it: {msg}"
+    );
+
+    // And that suggestion must itself be payable, and pay the identical script.
+    let suggested = address_to_destination(Chain::Litecoin, &expected).unwrap();
+    let direct: Vec<u8> = [&[0xa9, 0x14][..], &HASH20[..], &[0x87][..]].concat();
+    assert_eq!(
+        suggested.script, direct,
+        "the form we recommend must pay exactly what the original asked for"
+    );
 }
 
 #[test]

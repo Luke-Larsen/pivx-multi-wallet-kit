@@ -6,10 +6,16 @@
 //! and it does not constrain who we can pay.
 //!
 //! The output side has to accept whatever the recipient uses. On Litecoin that
-//! means `M...` and `3...` P2SH addresses and `ltc1...` native segwit, because
-//! exchange deposit addresses and every modern wallet's default receive
-//! address are one of those. A wallet that can only pay `L...` can receive
-//! funds and send them to other legacy wallets, which is a demo, not a wallet.
+//! means `M...` P2SH addresses and `ltc1...` native segwit, because exchange
+//! deposit addresses and every modern wallet's default receive address are one
+//! of those. A wallet that can only pay `L...` can receive funds and send them
+//! to other legacy wallets, which is a demo, not a wallet.
+//!
+//! Litecoin's older `3...` P2SH form is the exception, and it is refused. Its
+//! version byte is byte-identical to Bitcoin's, so the address cannot say which
+//! chain it belongs to, and the two sit side by side in every exchange deposit
+//! UI. The error names the equivalent `M...` address so a legitimate payment is
+//! one copy-paste away rather than a dead end.
 //!
 //! Paying a script we cannot ourselves spend is normal and safe: we are
 //! building the recipient's output, and only they need to satisfy it.
@@ -22,6 +28,14 @@
 
 use crate::params::Chain;
 use std::error::Error;
+
+/// Longest string any decoder here will look at.
+///
+/// BIP173 caps a segwit address at 90 characters; Base58Check addresses are 34.
+/// The ceiling exists because both decoders cost more than linear in their
+/// input, so an unbounded string is a denial of service on a function that sits
+/// directly behind a paste field.
+const MAX_ADDRESS_LEN: usize = 96;
 
 /// The output form an address asks to be paid with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,6 +63,7 @@ impl OutputKind {
 }
 
 /// A destination, decoded and validated against `chain`.
+#[derive(Clone, Debug)]
 pub struct Destination {
     pub kind: OutputKind,
     pub script: Vec<u8>,
@@ -65,6 +80,18 @@ pub fn address_to_destination(
     address: &str,
 ) -> Result<Destination, Box<dyn Error>> {
     let params = chain.params();
+
+    // Bound the work before any decoder sees it. BIP173 caps a segwit address
+    // at 90 characters and a Base58Check address is 34, so nothing past this
+    // can be valid, and both decoders get more expensive with length.
+    if address.len() > MAX_ADDRESS_LEN {
+        return Err(format!(
+            "Address is {} characters; no address form on any supported chain exceeds \
+             {MAX_ADDRESS_LEN}.",
+            address.len()
+        )
+        .into());
+    }
 
     // Segwit first: a bech32 string is not valid Base58Check, so trying it the
     // other way round produces a checksum error that explains nothing.
@@ -86,6 +113,37 @@ pub fn address_to_destination(
             kind: OutputKind::P2sh,
             script: p2sh_script(&hash),
         });
+    }
+
+    // A version byte this chain accepts but does not own. Litecoin's legacy
+    // `3...` P2SH prefix is byte-identical to Bitcoin's, so the string alone
+    // cannot say which chain it is for, and the two are adjacent in every
+    // exchange's deposit UI. Paying it is a coin flip: if the recipient watches
+    // the other chain, the coins are gone and nothing about the transaction
+    // looked wrong.
+    //
+    // Refuse, but do not leave the user stuck. The payload is a plain hash160,
+    // so the same destination re-encodes losslessly into this chain's
+    // unambiguous form, and naming it turns a dead end into one copy-paste.
+    if params.p2sh_prefixes_ambiguous.contains(&version) {
+        let unambiguous = params
+            .p2sh_prefixes
+            .first()
+            .map(|p| crate::base58check::encode_checked(*p, &hash));
+        let suggestion = match unambiguous {
+            Some(a) => format!(
+                " If you meant {chain:?}, the same destination in {chain:?}'s own form is {a} \
+                 (verify it against the source you copied from before sending)."
+            ),
+            None => String::new(),
+        };
+        return Err(format!(
+            "Address {address} uses version byte {version}, which {chain:?} accepts but shares \
+             with another chain, so it is impossible to tell from the address which chain it \
+             belongs to. Refusing to guess: paying the wrong one loses the coins \
+             permanently.{suggestion}"
+        )
+        .into());
     }
 
     // Name what the chain does take, so a user pasting an address from the
