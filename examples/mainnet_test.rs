@@ -8,6 +8,11 @@
 //!
 //! Usage: mainnet_test <command> [args...]   (mnemonic from $TEST_MNEMONIC)
 //!
+//! `$TEST_CHAIN` selects the chain: unset or `pivx` for PIVX, `litecoin`/`ltc`
+//! for Litecoin. It defaults to PIVX so every existing invocation behaves
+//! exactly as it did. Litecoin is transparent-only, so the shield, sync and
+//! cold-staking commands refuse on it rather than pretending.
+//!
 //! `examples/fetch-utxos.sh <address> <out.json>` is the companion fetcher: it
 //! joins each funding transaction's `scriptPubKey` onto the UTXO entries, which
 //! the UTXO endpoint never returns and which cold staking cannot work without.
@@ -26,8 +31,45 @@ fn mnemonic() -> String {
     std::env::var("TEST_MNEMONIC").expect("set TEST_MNEMONIC")
 }
 
+/// Chain under test, from `$TEST_CHAIN`. Defaults to PIVX so the existing
+/// commands are unchanged.
+fn chain() -> Chain {
+    match std::env::var("TEST_CHAIN").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "" | "pivx" | "piv" => Chain::Pivx,
+        "litecoin" | "ltc" => Chain::Litecoin,
+        other => panic!("unknown TEST_CHAIN {other:?}: want pivx or litecoin"),
+    }
+}
+
+/// Ticker for the amount labels, so a Litecoin run does not print "PIV".
+fn unit() -> &'static str {
+    match chain() {
+        Chain::Pivx => "PIV",
+        Chain::Litecoin => "LTC",
+    }
+}
+
+/// Refuse a PIVX-only command rather than producing something meaningless.
+fn pivx_only(cmd: &str) -> Result<(), Box<dyn Error>> {
+    if chain() != Chain::Pivx {
+        return Err(format!(
+            "`{cmd}` is PIVX-only: Litecoin has no shielded pool and no cold staking, so there \
+             is nothing here to exercise"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn load() -> Result<WalletData, Box<dyn Error>> {
-    wallet::import_wallet(Chain::Pivx, &mnemonic(), BIRTHDAY)
+    // The birthday only feeds PIVX's checkpoint lookup; a Litecoin wallet
+    // records the height as given. `$TEST_HEIGHT` overrides it for Litecoin,
+    // where the PIVX mainnet figure would be meaningless.
+    let height = std::env::var("TEST_HEIGHT")
+        .ok()
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(BIRTHDAY);
+    wallet::import_wallet(chain(), &mnemonic(), height)
 }
 
 fn seed(w: &WalletData) -> Vec<u8> {
@@ -47,8 +89,8 @@ fn piv(sat: u64) -> String {
 
 fn report(label: &str, r: &tb::TransparentTransactionResult) {
     println!("--- {label} ---");
-    println!("amount : {} PIV", piv(r.amount));
-    println!("fee    : {} PIV", piv(r.fee));
+    println!("amount : {} {}", piv(r.amount), unit());
+    println!("fee    : {} {}", piv(r.fee), unit());
     println!("inputs : {}", r.spent.len());
     println!("bytes  : {}", r.txhex.len() / 2);
     println!("TXHEX={}", r.txhex);
@@ -64,10 +106,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "addresses" => {
             println!("t 0/0   {}", w.get_transparent_address()?);
             for i in 1..=2u32 {
-                println!("t 0/{i}   {}", keys::transparent_address_at(Chain::Pivx, &sd, 0, i)?);
+                println!("t 0/{i}   {}", keys::transparent_address_at(chain(), &sd, 0, i)?);
             }
-            println!("stake   {}", cs::encode_staking_address(&cs::owner_hash_from_seed(&sd, 0, 0)?));
-            println!("shield  {}", keys::get_default_address(&w.extfvk)?);
+            if chain() == Chain::Pivx {
+                println!("stake   {}", cs::encode_staking_address(&cs::owner_hash_from_seed(&sd, 0, 0)?));
+                println!("shield  {}", keys::get_default_address(&w.extfvk)?);
+            } else {
+                println!("(no staking or shield address: Litecoin has neither)");
+            }
         }
 
         // Load UTXOs and print every balance accessor.
@@ -80,20 +126,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             w.unspent_utxos = utxos_from(&args[2], slot)?;
             println!("utxos            : {}", w.unspent_utxos.len());
             for u in &w.unspent_utxos {
-                println!("  {}:{} {} PIV script={} slot={:?}",
-                    &u.txid[..16], u.vout, piv(u.amount),
+                println!("  {}:{} {} {} script={} slot={:?}",
+                    &u.txid[..16], u.vout, piv(u.amount), unit(),
                     if u.script.is_empty() { "none" } else { "set" }, u.hd_slot);
             }
-            println!("transparentSat   : {} PIV", piv(w.get_transparent_balance()));
-            println!("rotatedSat       : {} PIV", piv(w.get_rotated_balance()));
-            println!("delegatedSat     : {} PIV", piv(w.get_delegated_balance()));
-            println!("immatureSat      : {} PIV", piv(w.get_immature_balance()));
-            println!("shieldSat        : {} PIV", piv(w.get_balance()));
+            println!("transparentSat   : {} {}", piv(w.get_transparent_balance()), unit());
+            println!("rotatedSat       : {} {}", piv(w.get_rotated_balance()), unit());
+            println!("delegatedSat     : {} {}", piv(w.get_delegated_balance()), unit());
+            println!("immatureSat      : {} {}", piv(w.get_immature_balance()), unit());
             let dest = w.get_transparent_address()?;
-            println!("maxSendable      : {} PIV", piv(tb::max_sendable_transparent(Chain::Pivx, &w, 1)));
-            println!("maxShieldable    : {} PIV", piv(tb::max_shieldable_transparent(&w)));
-            println!("maxShieldSpend   : {} PIV",
-                piv(shield_builder::max_shield_spendable(&w, &dest)));
+            println!("maxSendable      : {} {}", piv(tb::max_sendable_transparent(chain(), &w, 1)), unit());
+            if chain() == Chain::Pivx {
+                println!("shieldSat        : {} PIV", piv(w.get_balance()));
+                println!("maxShieldable    : {} PIV", piv(tb::max_shieldable_transparent(&w)));
+                println!("maxShieldSpend   : {} PIV",
+                    piv(shield_builder::max_shield_spendable(&w, &dest)));
+            }
         }
 
         // Wallet-state send to one or more recipients: "to:amountPIV" pairs.
@@ -110,9 +158,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 })
                 .collect();
-            let est = tb::estimate_raw_transparent_fee_to_many(Chain::Pivx, &w, &recipients)?;
-            println!("estimated fee: {} PIV", piv(est));
-            let r = tb::create_raw_transparent_transaction_to_many(Chain::Pivx, &mut w, &sd, &recipients)?;
+            let est = tb::estimate_raw_transparent_fee_to_many(chain(), &w, &recipients)?;
+            println!("estimated fee: {} {}", piv(est), unit());
+            let r = tb::create_raw_transparent_transaction_to_many(chain(), &mut w, &sd, &recipients)?;
             assert_eq!(r.fee, est, "estimator and builder disagreed");
             report("send", &r);
         }
@@ -123,13 +171,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             let index: u32 = args[4].parse()?;
             let utxos = utxos_from(&args[2], Some(HdSlot { change, index }))?;
             let amount = pivx_wallet_kit::amount::parse_piv_to_sat(&args[6])?;
-            let r = tb::create_raw_transparent_transaction_from_utxos(Chain::Pivx, 
+            let r = tb::create_raw_transparent_transaction_from_utxos(chain(),
                 &sd, change, index, &utxos, &args[5], amount,
             )?;
             report("send-from-slot", &r);
         }
 
         "delegate" => {
+            pivx_only("delegate")?;
             let mut w = load()?;
             w.unspent_utxos = utxos_from(&args[2], None)?;
             let amount = pivx_wallet_kit::amount::parse_piv_to_sat(&args[4])?;
@@ -142,6 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         "withdraw" => {
+            pivx_only("withdraw")?;
             let utxos = utxos_from(&args[2], None)?;
             let delegated: Vec<SerializedUTXO> = utxos
                 .into_iter()
@@ -154,17 +204,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         "sign" => {
-            let (_, _, pk) = keys::transparent_key_from_bip39_seed(Chain::Pivx, &sd, 0, 0)?;
-            let sig = pivx_wallet_kit::messages::sign_message(Chain::Pivx, &pk, &args[2])?;
+            let (_, _, pk) = keys::transparent_key_from_bip39_seed(chain(), &sd, 0, 0)?;
+            let sig = pivx_wallet_kit::messages::sign_message(chain(), &pk, &args[2])?;
             let addr = w.get_transparent_address()?;
             println!("address  : {addr}");
             println!("message  : {}", args[2]);
             println!("signature: {sig}");
             println!("verifies : {}",
-                pivx_wallet_kit::messages::verify_message(Chain::Pivx, &addr, &args[2], &sig)?);
+                pivx_wallet_kit::messages::verify_message(chain(), &addr, &args[2], &sig)?);
         }
 
         "inspect" => {
+            pivx_only("inspect")?;
             let script = simd::hex::hex_string_to_bytes(&args[2]);
             println!("is_p2cs   : {}", cs::is_p2cs(&script));
             if cs::is_p2cs(&script) {
@@ -178,6 +229,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Every guard that should refuse, run against real mainnet UTXOs.
         // Each prints PASS only if it was refused for the right reason.
         "guards" => {
+            pivx_only("guards")?;
             let all = utxos_from(&args[2], None)?;
             // The slot checks need ordinary outputs. A delegated one is refused
             // first and for a different reason, which is the correct precedence
@@ -306,6 +358,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Build transparent -> shield. Needs the prover and the chain tip.
         "shield" => {
+            pivx_only("shield")?;
             let mut w = load()?;
             w.unspent_utxos = utxos_from(&args[2], None)?;
             let amount = pivx_wallet_kit::amount::parse_piv_to_sat(&args[3])?;
@@ -322,12 +375,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Persist a fresh wallet at its birthday, ready to sync.
         "sync-init" => {
+            pivx_only("sync-init")?;
             std::fs::write(&args[2], serde_json::to_string(&w)?)?;
             println!("state written, last_block={}", w.last_block);
         }
 
         // Apply one batch of shield stream bytes to a persisted state.
         "sync-apply" => {
+            pivx_only("sync-apply")?;
             let mut w: WalletData = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;
             let bytes = std::fs::read(&args[3])?;
             let before = w.last_block;
@@ -347,6 +402,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Spend shield notes, to anywhere.
         "send-shield" => {
+            pivx_only("send-shield")?;
             let mut w: WalletData = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;
             let amount = pivx_wallet_kit::amount::parse_piv_to_sat(&args[4])?;
             let height: u32 = args[5].parse()?;
