@@ -11,6 +11,16 @@ pub const COIN: u64 = 100_000_000;
 pub const PIVX_COIN_TYPE: u32 = 119;
 
 /// Base58Check version byte for PIVX transparent pubkey addresses (produces `D...`).
+///
+/// **Shared with Dogecoin.** `base58Prefixes[PUBKEY_ADDRESS]` is 30 on both
+/// chains (`dogecoin/dogecoin`, `src/chainparams.cpp`), so a PIVX address and a
+/// Dogecoin address are byte-identical in structure and neither carries
+/// anything that says which chain it belongs to. The version-byte check that
+/// cleanly separates PIVX from Litecoin therefore cannot separate PIVX from
+/// Dogecoin, and adding that chain needs a different guard decided before any
+/// code lands. See the same hazard already realised between Litecoin's legacy
+/// `3...` P2SH form and Bitcoin's, which `p2sh_prefixes_ambiguous` exists to
+/// refuse.
 pub const PIVX_PUBKEY_PREFIX: u8 = 30;
 
 /// Base58Check version byte for PIVX cold-staking addresses (produces `S...`).
@@ -71,6 +81,7 @@ pub const COINBASE_MATURITY: u32 = 100;
 /// unconditionally PIVX-only rather than taking a `Chain` they'd never
 /// use a second value of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum Chain {
     #[default]
     Pivx,

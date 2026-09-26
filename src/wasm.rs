@@ -121,10 +121,30 @@ impl Fee {
         )
     }
 
-    /// PIVX v1 (raw P2PKH) tx fee: for pure transparent → transparent.
+    /// v1 (raw P2PKH) tx fee on **PIVX**: for pure transparent → transparent.
+    ///
+    /// Prefer `transparentTxFor`, which takes the chain explicitly. This one
+    /// has no `Wallet` to read a chain from, so it cannot infer one and is
+    /// fixed to PIVX.
+    ///
+    /// It happens to return the right number for Litecoin today, because both
+    /// chains charge 10 sat/byte. That is a coincidence of two independent
+    /// constants, not a guarantee, and `tests/chain_fee_rates.rs` exists to
+    /// make the day they diverge a test failure rather than a wrong fee.
     #[wasm_bindgen(js_name = transparentTx)]
     pub fn transparent_tx(inputs: u64, outputs: u64) -> u64 {
         crate::fees::estimate_raw_transparent_fee(Chain::Pivx, inputs as usize, outputs as usize)
+    }
+
+    /// As `transparentTx`, for an explicitly named chain.
+    ///
+    /// Sizes every output as P2PKH. On a chain that can pay segwit or P2SH the
+    /// real cost varies with the destination, so for an actual send use
+    /// `wallet.estimateSendTransparentFee`, which prices the addresses it is
+    /// given. This is for sizing a hypothetical transaction from counts alone.
+    #[wasm_bindgen(js_name = transparentTxFor)]
+    pub fn transparent_tx_for(chain: Chain, inputs: u64, outputs: u64) -> u64 {
+        crate::fees::estimate_raw_transparent_fee(chain, inputs as usize, outputs as usize)
     }
 }
 
@@ -547,6 +567,17 @@ impl Wallet {
         NotesOut {
             notes: self.inner.unspent_notes.clone(),
         }
+    }
+
+    /// Which chain this wallet is for.
+    ///
+    /// `chain` is unencrypted in the serialized blob, so a consumer could
+    /// `JSON.parse` it out, but that couples callers to the blob's layout for
+    /// something the wallet can simply be asked. The value matches what the
+    /// blob carries, so the two cannot disagree.
+    #[wasm_bindgen(js_name = chain)]
+    pub fn chain(&self) -> Chain {
+        self.inner.chain
     }
 
     /// Snapshot of unspent transparent UTXOs.

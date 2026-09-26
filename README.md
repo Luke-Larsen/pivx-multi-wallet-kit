@@ -63,7 +63,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) *(PIVX-only)* |
 | `transparent::builder`          | `Chain`-parameterized raw P2PKH transaction builder (canonical entry for both chains) + PIVX-only `create_shielding_transaction` (t → shield) |
 | `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders *(PIVX-only)* |
-| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers, with additive `createLitecoin` / `fromMnemonicLitecoin` / `verifyMessageLitecoin` entry points |
+| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers, with additive `createLitecoin` / `fromMnemonicLitecoin` / `verifyMessageLitecoin` / `wallet.chain()` / `Fee.transparentTxFor` entry points |
 
 ## Building
 
@@ -74,7 +74,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (339 total: 20 unit + 319 integration, many against real
+# Tests (371 total: 20 unit + 351 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -324,6 +324,16 @@ wallet.setUtxos(parseBlockbookUtxos(raw));
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 const sig = wallet.signMessage('hello');
 console.log(verifyMessageLitecoin(transparent, 'hello', sig));
+
+console.log(wallet.chain()); // "Litecoin"
+
+// Sizing a hypothetical tx from counts: name the chain rather than relying on
+// Fee.transparentTx, which is fixed to PIVX because a static has no wallet to
+// read a chain from.
+Fee.transparentTxFor('Litecoin', 1, 2);
+// For a real send, prefer the wallet estimator: it prices the actual
+// destination, and a ltc1.../M... output is not the same size as a P2PKH one.
+wallet.estimateSendTransparentFee(toAddress, 100_000n);
 
 // wallet.shieldAddress(), wallet.delegateColdStake(...), etc. all error: not
 // supported on a Litecoin wallet.
