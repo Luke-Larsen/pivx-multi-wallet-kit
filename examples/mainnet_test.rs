@@ -161,7 +161,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             let est = tb::estimate_raw_transparent_fee_to_many(chain(), &w, &recipients)?;
             println!("estimated fee: {} {}", piv(est), unit());
             let r = tb::create_raw_transparent_transaction_to_many(chain(), &mut w, &sd, &recipients)?;
-            assert_eq!(r.fee, est, "estimator and builder disagreed");
+            // The estimator is a lower bound, not an equality. When the change
+            // that would be left is below the dust threshold it is dropped into
+            // the fee rather than emitted as an output no node would relay, and
+            // the estimator cannot know that before the outputs are resolved.
+            // `result.fee` is the figure actually paid.
+            //
+            // Asserting equality here was wrong and had simply never been
+            // exercised: it takes a send that leaves dust change, which no
+            // previous run of this harness happened to do. It fires on PIVX
+            // exactly as readily as on Litecoin.
+            assert!(
+                r.fee >= est,
+                "builder charged {} but the estimator quoted {est}: the estimator must never \
+                 quote more than the builder charges",
+                r.fee
+            );
+            if r.fee > est {
+                println!(
+                    "note: fee is {} above the estimate, which is dust change folded in \
+                     rather than emitted",
+                    piv(r.fee - est)
+                );
+            }
             report("send", &r);
         }
 
