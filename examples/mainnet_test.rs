@@ -431,7 +431,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Smaller than the old 50,000: a batch is held in memory while it
             // is applied, and the point of this rewrite is to stop sizing
             // memory by the input.
-            const BATCH: usize = 2_000;
+            // Overridable so the batch size can be isolated as a variable when
+            // a sync produces a tree that disagrees with the chain.
+            let batch: usize = std::env::var("SYNC_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2_000);
 
             let mut reader: Box<dyn std::io::Read> = if args[3] == "-" {
                 Box::new(std::io::BufReader::new(std::io::stdin()))
@@ -442,7 +447,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (mut batches, mut total_blocks) = (0u32, 0usize);
             loop {
                 let Some(blocks) =
-                    pivx_wallet_kit::sync::parse_next_blocks(&mut reader, BATCH)?
+                    pivx_wallet_kit::sync::parse_next_blocks(&mut reader, batch)?
                 else {
                     break;
                 };
