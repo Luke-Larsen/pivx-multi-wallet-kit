@@ -403,23 +403,71 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Apply one batch of shield stream bytes to a persisted state.
+        // Apply a shield stream to a wallet state, start to finish.
+        //
+        // `sync-apply <state.json> <stream.bin|->`, where `-` reads stdin, so
+        // the stream can be piped straight from the fetch and never stored:
+        //
+        //     curl -s "$RPC/getshielddata?startHeight=$(...)" \
+        //       | cargo run --release --example mainnet_test sync-apply state.json -
+        //
+        // The previous version read the whole file with `std::fs::read` and
+        // parsed one batch from byte zero, which made it unusable for a real
+        // sync in two separate ways. Calling it again re-parsed the same first
+        // batch, because nothing carried a position between runs, so it could
+        // never walk forward past 50,000 blocks; and a catch-up from a
+        // checkpoint is hundreds of megabytes, which it held in memory at once.
+        // On a box where /tmp is a tmpfs, staging that file is the same memory
+        // twice over.
+        //
+        // `parse_next_blocks` takes a `&mut dyn Read` and advances it, so the
+        // fix is to hand it one reader and keep calling until the stream ends.
+        // Memory is then bounded by the batch, not the stream.
         "sync-apply" => {
             pivx_only("sync-apply")?;
             let mut w: WalletData = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;
-            let bytes = std::fs::read(&args[3])?;
             let before = w.last_block;
-            let blocks = {
-                let mut c = std::io::Cursor::new(&bytes[..]);
-                pivx_wallet_kit::sync::parse_next_blocks(&mut c, 50_000)?.unwrap_or_default()
+
+            // Smaller than the old 50,000: a batch is held in memory while it
+            // is applied, and the point of this rewrite is to stop sizing
+            // memory by the input.
+            const BATCH: usize = 2_000;
+
+            let mut reader: Box<dyn std::io::Read> = if args[3] == "-" {
+                Box::new(std::io::BufReader::new(std::io::stdin()))
+            } else {
+                Box::new(std::io::BufReader::new(std::fs::File::open(&args[3])?))
             };
-            let n = blocks.len();
-            let res = pivx_wallet_kit::sapling::sync::apply_blocks_to_wallet(&mut w, blocks)?;
-            std::fs::write(&args[2], serde_json::to_string(&w)?)?;
+
+            let (mut batches, mut total_blocks) = (0u32, 0usize);
+            loop {
+                let Some(blocks) =
+                    pivx_wallet_kit::sync::parse_next_blocks(&mut reader, BATCH)?
+                else {
+                    break;
+                };
+                if blocks.is_empty() {
+                    break;
+                }
+                total_blocks += blocks.len();
+                batches += 1;
+                pivx_wallet_kit::sapling::sync::apply_blocks_to_wallet(&mut w, blocks)?;
+
+                // Persist every batch. A sync of this length is worth resuming
+                // rather than restarting, and the process being killed partway
+                // is not hypothetical: it already happened once here, to an
+                // out-of-memory kill caused by the behaviour this replaces.
+                std::fs::write(&args[2], serde_json::to_string(&w)?)?;
+                println!(
+                    "  batch {batches}: {total_blocks} blocks | height {} | notes {} | shieldSat {}",
+                    w.last_block, w.unspent_notes.len(), piv(w.get_balance())
+                );
+            }
+
             println!(
-                "{} bytes -> {n} blocks | {} -> {} | notes {} | shieldSat {}",
-                bytes.len(), before, w.last_block, w.unspent_notes.len(), piv(w.get_balance())
+                "{total_blocks} blocks in {batches} batch(es) | {} -> {} | notes {} | shieldSat {}",
+                before, w.last_block, w.unspent_notes.len(), piv(w.get_balance())
             );
-            let _ = res;
         }
 
         // Spend shield notes, to anywhere.
