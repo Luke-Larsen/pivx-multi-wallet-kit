@@ -12,15 +12,34 @@ pub const PIVX_COIN_TYPE: u32 = 119;
 
 /// Base58Check version byte for PIVX transparent pubkey addresses (produces `D...`).
 ///
-/// **Shared with Dogecoin.** `base58Prefixes[PUBKEY_ADDRESS]` is 30 on both
-/// chains (`dogecoin/dogecoin`, `src/chainparams.cpp`), so a PIVX address and a
-/// Dogecoin address are byte-identical in structure and neither carries
-/// anything that says which chain it belongs to. The version-byte check that
-/// cleanly separates PIVX from Litecoin therefore cannot separate PIVX from
-/// Dogecoin, and adding that chain needs a different guard decided before any
-/// code lands. See the same hazard already realised between Litecoin's legacy
-/// `3...` P2SH form and Bitcoin's, which `p2sh_prefixes_ambiguous` exists to
-/// refuse.
+/// **Shared with Dogecoin, and this cannot be fixed here.**
+///
+/// `base58Prefixes[PUBKEY_ADDRESS]` is 30 on both chains (`dogecoin/dogecoin`
+/// and `PIVX-Project/PIVX`, both `src/chainparams.cpp`). A PIVX address and a
+/// Dogecoin address are therefore the same 25 bytes in the same layout: same
+/// version byte, same 20-byte hash, same checksum. Nothing distinguishes them,
+/// so no amount of validation in this crate can tell you which chain an address
+/// belongs to.
+///
+/// That makes this different in kind from the other cross-chain hazards here,
+/// all of which *are* caught. A Litecoin `L...` address fails PIVX's version
+/// check. A `bc1...` fails on hrp. Litecoin's legacy `3...` P2SH form collides
+/// with Bitcoin's, and `p2sh_prefixes_ambiguous` refuses it and names the
+/// unambiguous `M...` re-encoding instead. **There is no equivalent escape here:
+/// there is no unambiguous form of a Dogecoin address to redirect anyone to.**
+///
+/// The consequence, stated plainly: a Dogecoin wallet handed a PIVX address will
+/// build, sign and broadcast a valid Dogecoin transaction paying it, and the
+/// coins land at a hash whose key exists only on the other chain. The reverse
+/// holds too. Neither transaction looks wrong at any point.
+///
+/// What the kit does do is make the chain explicit rather than inferred: every
+/// address and transaction function takes a [`Chain`], and a wallet records its
+/// own. So the kit never *guesses* which chain is meant. What it cannot do is
+/// check that the caller guessed right.
+///
+/// Confirming a destination's chain is therefore the consumer's responsibility.
+/// The README sets out what that means in practice.
 pub const PIVX_PUBKEY_PREFIX: u8 = 30;
 
 /// Base58Check version byte for PIVX cold-staking addresses (produces `S...`).
@@ -86,6 +105,7 @@ pub enum Chain {
     #[default]
     Pivx,
     Litecoin,
+    Dogecoin,
 }
 
 /// The constants [`Chain`] selects between for transparent-tx work.
@@ -216,12 +236,60 @@ pub const LITECOIN: ChainParams = ChainParams {
     dust: DustPolicy::PerByte { sat_per_kb: 30_000 },
 };
 
+/// Dogecoin mainnet transparent-chain constants.
+///
+/// Every value read from `dogecoin/dogecoin` master. Two of them are traps, so
+/// they are called out rather than left to be rediscovered:
+///
+/// * `coinbase_maturity`: **240, not 30.** `chainparams.cpp` assigns
+///   `consensus.nCoinbaseMaturity = 30` at `nHeightEffective = 0`, then
+///   `digishieldConsensus` raises it to 240 from height 145000, and
+///   `auxpowConsensus` inherits that from 371337. Mainnet is long past both, so
+///   240 is the figure in force; 30 is what a reader who stops at the first
+///   assignment walks away with.
+/// * `dust`: flat, not a rate. See [`DustPolicy`]. Dogecoin's `CTxOut::IsDust`
+///   takes a `CAmount` and compares `nValue < dustLimit` with no script length
+///   involved, where Bitcoin's takes a `CFeeRate`. `DEFAULT_DUST_LIMIT` is
+///   `RECOMMENDED_MIN_TX_FEE` (COIN/100, so 1,000,000 sat) and
+///   `DEFAULT_HARD_DUST_LIMIT` is a tenth of that.
+///
+/// The rest:
+///
+/// * `coin_type`: SLIP-44 3.
+/// * `pubkey_prefix`: `PUBKEY_ADDRESS` 30 in `chainparams.cpp`. **Shared with
+///   PIVX**, which is the hazard documented on [`PIVX_PUBKEY_PREFIX`] and in
+///   the README. Nothing in this crate can tell the two apart.
+/// * `p2sh_prefixes`: `SCRIPT_ADDRESS` 22, producing `9...` and `A...`.
+/// * `bech32_hrp`: none. Dogecoin has no segwit, and `chainparams.cpp` carries
+///   no `bech32_hrp` field at all.
+/// * `msg_magic`: `strMessageMagic` in `validation.cpp`.
+/// * `fee_per_byte`: 100. `DEFAULT_MIN_RELAY_TX_FEE` is
+///   `RECOMMENDED_MIN_TX_FEE / 10`, which is 100,000 sat/kB. Unlike dust, this
+///   is an ordinary rate, so no special handling is needed: the figure is simply
+///   ten times Litecoin's and PIVX's.
+pub const DOGECOIN: ChainParams = ChainParams {
+    coin_type: 3,
+    pubkey_prefix: 30,
+    p2sh_prefixes: &[22],
+    p2sh_prefixes_ambiguous: &[],
+    bech32_hrp: None,
+    staking_prefix: None,
+    coinbase_maturity: 240,
+    msg_magic: "Dogecoin Signed Message:\n",
+    fee_per_byte: 100,
+    dust: DustPolicy::Flat {
+        relay: 100_000,
+        mine: 1_000_000,
+    },
+};
+
 impl Chain {
     /// The constants for this chain.
     pub const fn params(self) -> &'static ChainParams {
         match self {
             Chain::Pivx => &PIVX,
             Chain::Litecoin => &LITECOIN,
+            Chain::Dogecoin => &DOGECOIN,
         }
     }
 }

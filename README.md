@@ -1,7 +1,7 @@
 # Multi Wallet Kit
 
-Pure-Rust wallet primitives for [PIVX](https://pivx.org) (transparent + Sapling shield) and
-[Litecoin](https://litecoin.org) (transparent only).
+Pure-Rust wallet primitives for [PIVX](https://pivx.org) (transparent + Sapling shield),
+[Litecoin](https://litecoin.org) and [Dogecoin](https://dogecoin.com) (transparent only).
 
 Designed as the shared core that powers wallet clients (native CLIs, MCP servers, desktop apps, and embeddable web wallets) from a single audited codebase.
 
@@ -12,8 +12,8 @@ This repository is a fork of [PIVX-Labs/pivx-wallet-kit](https://github.com/PIVX
 |                                  | [Upstream](https://github.com/PIVX-Labs/pivx-wallet-kit) | This fork |
 |----------------------------------|-----------|-----------|
 | PIVX transparent, Sapling shield, cold staking | yes | yes, unchanged |
-| Litecoin (transparent only)      | no  | yes |
-| Chain selection                  | n/a | `Chain::Pivx` / `Chain::Litecoin` on one code path |
+| Litecoin, Dogecoin (transparent only) | no  | yes |
+| Chain selection                  | n/a | `Chain::Pivx` / `Chain::Litecoin` / `Chain::Dogecoin` on one code path |
 | Published to npm                 | [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit) | not published; consume from git |
 
 **Which should you use?** If you are building a PIVX-only wallet, use upstream: it is the canonical kit, it is published to npm, and nothing here improves PIVX behaviour. Use this fork if you need Litecoin, or another transparent chain later, from the same library and the same seed.
@@ -47,7 +47,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 
 | Module                          | Purpose                                                                    |
 |---------------------------------|----------------------------------------------------------------------------|
-| `params`                        | `Chain` (`Pivx`/`Litecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate, plus the PIVX-only Sapling param SHA256 hashes |
+| `params`                        | `Chain` (`Pivx`/`Litecoin`/`Dogecoin`) and per-chain constants: coin type, prefixes, coinbase maturity, message magic, fee rate, `DustPolicy`, plus the PIVX-only Sapling param SHA256 hashes |
 | `base58check`                   | Base58Check codec shared by both chains' P2PKH addressing               |
 | `address`                       | Destination decoding: P2PKH on both chains, plus P2SH and bech32 segwit where the chain has them |
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
@@ -63,7 +63,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) *(PIVX-only)* |
 | `transparent::builder`          | `Chain`-parameterized raw P2PKH transaction builder (canonical entry for both chains) + PIVX-only `create_shielding_transaction` (t → shield) |
 | `transparent::coldstake`        | Pay-to-cold-staking: P2CS script build/parse, `S...` addresses, delegation and withdrawal builders *(PIVX-only)* |
-| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers, with additive `createLitecoin` / `fromMnemonicLitecoin` / `verifyMessageLitecoin` / `wallet.chain()` / `Fee.transparentTxFor` entry points |
+| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers, with additive `createLitecoin` / `fromMnemonicLitecoin` / `verifyMessageLitecoin` / `wallet.chain()` / `Fee.transparentTxFor` / `createDogecoin` / `fromMnemonicDogecoin` / `verifyMessageDogecoin` entry points |
 
 ## Building
 
@@ -74,7 +74,7 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (371 total: 20 unit + 351 integration, many against real
+# Tests (402 total: 20 unit + 382 integration, many against real
 # mainnet tx fixtures)
 cargo test
 ```
@@ -338,6 +338,106 @@ wallet.estimateSendTransparentFee(toAddress, 100_000n);
 // wallet.shieldAddress(), wallet.delegateColdStake(...), etc. all error: not
 // supported on a Litecoin wallet.
 ```
+
+### Dogecoin support
+
+Transparent-only, like Litecoin, and with **no segwit at all**: Dogecoin Core carries no
+`bech32_hrp`, so there is no `doge1...` form to support. It pays `D...` (P2PKH) and `9...`
+or `A...` (P2SH, version byte 22).
+
+Constants, each read from `dogecoin/dogecoin` master. Two are worth knowing about:
+
+| | Dogecoin | Note |
+|---|---|---|
+| SLIP-44 coin type | 3 | |
+| P2PKH version | 30 | **same as PIVX**, see below |
+| P2SH version | 22 | `9...` and `A...` |
+| Fee rate | 100 sat/byte | `DEFAULT_MIN_RELAY_TX_FEE` is 100,000 sat/kB, ten times Litecoin's |
+| Dust | flat, 1,000,000 sat | not a rate, see below |
+| Coinbase maturity | **240** | not the 30 in the first assignment, see below |
+| Message magic | `Dogecoin Signed Message:\n` | |
+
+**Coinbase maturity is 240, not 30.** `chainparams.cpp` sets
+`consensus.nCoinbaseMaturity = 30` effective from height 0, then `digishieldConsensus`
+raises it to 240 from height 145000, and `auxpowConsensus` inherits that from 371337.
+Mainnet is long past both. A reader who stops at the first assignment gets 30, which is
+wrong by a factor of eight.
+
+**Dust is a flat amount, not a rate.** Bitcoin, Litecoin and PIVX price an output by what
+it would cost to spend, so the threshold scales with output size. Dogecoin's
+`CTxOut::IsDust` takes a `CAmount` and compares `nValue < dustLimit` with no script length
+involved. It also has two limits: `DEFAULT_HARD_DUST_LIMIT` (100,000 sat) for what relays
+at all and `DEFAULT_DUST_LIMIT` (1,000,000 sat) for what miners include. The kit enforces
+the higher one, because an output that relays but is never mined strands coins in a
+transaction that looked accepted. See `DustPolicy` in `params`.
+
+Note that only *dust* differs this way. Dogecoin's fee is an ordinary sat/kB rate, so
+nothing special is needed there.
+
+## A Dogecoin address and a PIVX address are indistinguishable
+
+**Read this before shipping Dogecoin support to users.**
+
+Both chains use Base58Check version byte 30. A PIVX address and a Dogecoin address are the
+same 25 bytes in the same layout: same version byte, same 20-byte hash, same checksum.
+Nothing tells them apart, so **no validation in this library can determine which chain an
+address belongs to**, and none ever will.
+
+This is different in kind from every other cross-chain mistake here, all of which the kit
+*does* catch:
+
+| Mistake | Caught? | How |
+|---|---|---|
+| `L...` Litecoin address on PIVX | yes | version byte 48 vs 30 |
+| `bc1...` Bitcoin address on Litecoin | yes | bech32 hrp `bc` vs `ltc` |
+| `ltc1...` on PIVX | yes | PIVX has no segwit |
+| `3...` Litecoin P2SH (collides with Bitcoin) | yes | refused, and the error names the `M...` equivalent |
+| **PIVX address on Dogecoin, or the reverse** | **no** | **nothing to distinguish** |
+
+For the `3...` case there is an escape: the same payload re-encodes as an unambiguous
+`M...`, so the kit refuses the ambiguous form and tells you what to use instead. **There is
+no equivalent for Dogecoin.** There is no unambiguous form of a Dogecoin address.
+
+### What this means concretely
+
+A Dogecoin wallet handed a PIVX address will build, sign and broadcast a valid Dogecoin
+transaction paying it. The coins land at a script hash whose key exists only on PIVX, where
+nobody is watching that address. The reverse holds identically. Nothing looks wrong at any
+point: the address validates, the fee is right, the transaction confirms.
+
+The funds are not recoverable by the recipient, because they never received anything. They
+are recoverable only by whoever holds the key for that hash *on the chain the coins landed
+on*, which in the usual case is nobody.
+
+### What the kit does, and does not, do
+
+It makes the chain **explicit rather than inferred**. Every address and transaction function
+takes a `Chain`, and a wallet records its own and uses it. So the kit never guesses which
+chain you meant.
+
+What it cannot do is check that you guessed right.
+
+### What a consumer should do
+
+Since the library cannot carry this, the responsibility lands on the application. In rough
+order of effectiveness:
+
+- **Never infer a chain from an address.** Derive it from which wallet the user is spending
+  from, and make that visible in the send UI.
+- **Show the chain at the point of confirmation**, next to the amount and the destination,
+  not only in a header or a tab title.
+- **Prefer separate address books per chain**, rather than one list the user picks from.
+  A shared list is the single most likely way this goes wrong.
+- **Consider an explicit confirmation step** for Dogecoin and PIVX sends specifically,
+  worded around the chain rather than the amount.
+- **Do not support pasting an address without a chain selected first.** If the chain is
+  chosen after the address, the user has already made the decision that matters without
+  being asked about it.
+
+If you support both PIVX and Dogecoin in one application, treat the pairing as a known
+hazard and design the flow around it. Everything else in this library is built so a mistake
+produces an error rather than a loss; this is the one case where that was not achievable,
+and it is the consumer's to handle.
 
 ### Cold staking needs scripts (PIVX-only)
 
