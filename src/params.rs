@@ -120,8 +120,40 @@ pub struct ChainParams {
     pub msg_magic: &'static str,
     /// Flat relay-fee rate, in satoshis per byte, for the raw P2PKH builder.
     pub fee_per_byte: u64,
-    /// `DUST_RELAY_TX_FEE`-equivalent, in satoshis per kilobyte.
-    pub dust_relay_fee: u64,
+    /// How this chain decides an output is too small to be worth creating.
+    pub dust: DustPolicy,
+}
+
+/// How a chain sets its dust threshold.
+///
+/// Two genuinely different models, not two spellings of one. Bitcoin prices an
+/// output by what it would cost to spend, so the threshold scales with the
+/// output's size. Dogecoin sets a flat floor and ignores size entirely, and its
+/// `CTxOut::IsDust` takes a `CAmount` where Bitcoin's takes a `CFeeRate` to
+/// make that explicit.
+///
+/// A rate cannot express a flat limit, which is why this is an enum rather than
+/// a number. Only dust differs this way: every chain here prices *fees* as a
+/// rate, so [`ChainParams::fee_per_byte`] stays a plain figure.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DustPolicy {
+    /// Threshold scales with the output's serialized size, priced at this rate
+    /// in satoshis per kilobyte. `DUST_RELAY_TX_FEE` in a Bitcoin-descended
+    /// `policy/policy.h`. Used by PIVX and Litecoin, both at 30,000.
+    PerByte { sat_per_kb: u64 },
+    /// A flat minimum per output, independent of size.
+    ///
+    /// Dogecoin's model, which carries two thresholds rather than one:
+    /// `DEFAULT_HARD_DUST_LIMIT` governs what relays at all and
+    /// `DEFAULT_DUST_LIMIT` what miners will include. Both are node-overridable
+    /// (`-harddustlimit`, `-dustlimit`).
+    Flat {
+        /// Below this an output does not relay. Dogecoin's hard dust limit.
+        relay: u64,
+        /// Below this an output relays but is not mined. Dogecoin's soft limit,
+        /// and the higher of the two.
+        mine: u64,
+    },
 }
 
 pub const PIVX: ChainParams = ChainParams {
@@ -139,7 +171,7 @@ pub const PIVX: ChainParams = ChainParams {
     coinbase_maturity: COINBASE_MATURITY,
     msg_magic: "DarkNet Signed Message:\n",
     fee_per_byte: 10,
-    dust_relay_fee: 30_000,
+    dust: DustPolicy::PerByte { sat_per_kb: 30_000 },
 };
 
 /// Litecoin mainnet transparent-chain constants.
@@ -167,7 +199,7 @@ pub const PIVX: ChainParams = ChainParams {
 /// * `fee_per_byte`: 10 sat/B is 10,000 sat/kB, matching the wallet default
 ///   `DEFAULT_TRANSACTION_MINFEE` and clearing the 1,000 sat/kB
 ///   `DEFAULT_MIN_RELAY_TX_FEE` floor in `validation.h` ten times over.
-/// * `dust_relay_fee`: `DUST_RELAY_TX_FEE` in `policy/policy.h`, which is
+/// * `dust`: `DUST_RELAY_TX_FEE` in `policy/policy.h`, which is
 ///   30,000, the same as PIVX. Bitcoin's is 3,000. Pinned by
 ///   `tests/litecoin_dust_threshold.rs`, because using Bitcoin's value here
 ///   builds change outputs a Litecoin node rejects as dust.
@@ -181,7 +213,7 @@ pub const LITECOIN: ChainParams = ChainParams {
     coinbase_maturity: 100,
     msg_magic: "Litecoin Signed Message:\n",
     fee_per_byte: 10,
-    dust_relay_fee: 30_000,
+    dust: DustPolicy::PerByte { sat_per_kb: 30_000 },
 };
 
 impl Chain {
