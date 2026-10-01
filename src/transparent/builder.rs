@@ -56,7 +56,8 @@ pub struct TransparentTransactionResult {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct Recipient {
-    /// Transparent (`D...`) destination address.
+    /// Destination address, in any form the chain can pay: `D...` on PIVX;
+    /// `L...`, `M...`, `3...` or `ltc1...` on Litecoin.
     pub address: String,
     #[tsify(type = "bigint")]
     pub amount: u64,
@@ -111,7 +112,7 @@ fn resolve_outputs(
         if r.amount == 0 {
             return Err(format!("Recipient {} has a zero amount", r.address).into());
         }
-        let script = keys::address_to_p2pkh_script(chain, &r.address)?;
+        let script = crate::address::address_to_script(chain, &r.address)?;
         // A dust output makes the whole transaction non-standard, so no node
         // relays it. Better to refuse than to hand back bytes that cannot be
         // broadcast.
@@ -153,6 +154,10 @@ fn total_recipient_amount(recipients: &[Recipient]) -> Result<u64, Box<dyn Error
         .ok_or_else(|| "Recipient amounts overflow u64".into())
 }
 
+/// Bytes in a P2PKH scriptPubKey. Every address this kit derives is P2PKH, so
+/// this is what change always costs, whatever form the recipients take.
+pub(crate) const P2PKH_SCRIPT_LEN: usize = 25;
+
 /// A UTXO selection plus the fee and recipient total it implies.
 struct TransparentSelection {
     selected: Vec<SerializedUTXO>,
@@ -178,6 +183,7 @@ fn select_transparent_utxos(
     if recipients.is_empty() {
         return Err("No recipients provided".into());
     }
+    let mut output_script_lens: Vec<usize> = Vec::with_capacity(recipients.len() + 1);
     for r in recipients {
         if chain == Chain::Pivx && r.address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address())
         {
@@ -193,8 +199,18 @@ fn select_transparent_utxos(
         }
         // Reject an unusable address before doing any selection work, so the
         // estimator and the builder fail on the same input for the same reason.
-        keys::address_to_p2pkh_script(chain, &r.address)?;
+        // The decoded form is kept: an output's size depends on which script
+        // pays it, and the fee has to be sized from the real thing.
+        output_script_lens.push(
+            crate::address::address_to_destination(chain, &r.address)?
+                .kind
+                .script_len(),
+        );
     }
+    // Change comes back to one of our own addresses, which is always P2PKH.
+    // Assuming change up front can only over-estimate the fee, which is the
+    // safe direction: under-estimating strands the tx unconfirmed.
+    output_script_lens.push(P2PKH_SCRIPT_LEN);
 
     let amount = total_recipient_amount(recipients)?;
 
@@ -203,11 +219,6 @@ fn select_transparent_utxos(
     if utxos.is_empty() {
         return Err(no_spendable_utxos_error(wallet));
     }
-
-    // Output count for the fee model: recipients plus a possible change
-    // output. Assuming change up front can only over-estimate the fee, which
-    // is the safe direction: under-estimating strands the tx unconfirmed.
-    let fee_output_count = recipients.len() + 1;
 
     let mut selected: Vec<SerializedUTXO> = Vec::new();
     let mut total: u64 = 0;
@@ -220,13 +231,21 @@ fn select_transparent_utxos(
         total = total
             .checked_add(utxo.amount)
             .ok_or("UTXO total overflow: explorer returned malformed amounts")?;
-        let fee = fees::estimate_raw_transparent_fee(chain, selected.len(), fee_output_count);
+        let fee = fees::estimate_raw_transparent_fee_for_scripts(
+            chain,
+            selected.len(),
+            &output_script_lens,
+        );
         if total >= amount.saturating_add(fee) {
             break;
         }
     }
 
-    let fee = fees::estimate_raw_transparent_fee(chain, selected.len(), fee_output_count);
+    let fee = fees::estimate_raw_transparent_fee_for_scripts(
+        chain,
+        selected.len(),
+        &output_script_lens,
+    );
     let needed = amount
         .checked_add(fee)
         .ok_or("Amount plus fee overflows u64")?;
@@ -375,6 +394,55 @@ pub fn max_sendable_transparent(chain: Chain, wallet: &WalletData, recipient_cou
     max
 }
 
+/// As [`max_sendable_transparent`], sized against the addresses actually being
+/// paid rather than assuming every recipient is P2PKH.
+///
+/// Prefer this wherever the destinations are known. On a chain that can pay
+/// segwit and P2SH, output size varies by address form, and the count-based
+/// version is only exact for P2PKH: it over-charges a `ltc1q...` or `M...`
+/// recipient by a few bytes, and under-charges a P2WSH one. Over-charging
+/// merely offers slightly less than it could; under-charging offers more than
+/// the send can actually cover, and the send then fails.
+///
+/// Returns 0 on an address this chain cannot pay, matching the rest of this
+/// function's "0 means disable the control" contract rather than erroring at a
+/// UI that only wants a number.
+pub fn max_sendable_transparent_to(chain: Chain, wallet: &WalletData, addresses: &[&str]) -> u64 {
+    let utxos = spendable_utxos(wallet);
+    if utxos.is_empty() || addresses.is_empty() {
+        return 0;
+    }
+    let Some(total) = utxos.iter().try_fold(0u64, |a, u| a.checked_add(u.amount)) else {
+        return 0;
+    };
+
+    let mut lens: Vec<usize> = Vec::with_capacity(addresses.len() + 1);
+    for a in addresses {
+        match crate::address::address_to_destination(chain, a) {
+            Ok(d) => lens.push(d.kind.script_len()),
+            Err(_) => return 0,
+        }
+    }
+    // The change output a send might emit, on the same conservative footing as
+    // `max_sendable_transparent`.
+    let with_change = {
+        let mut l = lens.clone();
+        l.push(P2PKH_SCRIPT_LEN);
+        l
+    };
+
+    let fee = fees::estimate_raw_transparent_fee_for_scripts(chain, utxos.len(), &with_change);
+    let max = total.saturating_sub(fee);
+
+    // Dust rises with script size, so the bulkiest recipient sets the bar.
+    let bar = lens
+        .iter()
+        .map(|&l| fees::dust_threshold(chain, l))
+        .max()
+        .unwrap_or_else(|| fees::dust_threshold(chain, P2PKH_SCRIPT_LEN));
+    if max < bar { 0 } else { max }
+}
+
 /// Largest amount [`create_shielding_transaction`] can move into a shield
 /// address right now, after fee.
 ///
@@ -389,8 +457,11 @@ pub fn max_shieldable_transparent(wallet: &WalletData) -> u64 {
     let Some(total) = utxos.iter().try_fold(0u64, |a, u| a.checked_add(u.amount)) else {
         return 0;
     };
-    // Matches `create_shielding_transaction`: 0 transparent outputs, 2 sapling.
-    let fee = fees::estimate_fee(utxos.len() as u64, 0, 0, 2);
+    // Must match `create_shielding_transaction`'s model exactly: 1 transparent
+    // output for change, 2 sapling. If this quotes a smaller fee than the
+    // builder charges, the figure it returns is not buildable, which is the
+    // one thing a "max" accessor must never do.
+    let fee = fees::estimate_fee(utxos.len() as u64, 1, 0, 2);
     total.saturating_sub(fee)
 }
 
@@ -500,7 +571,14 @@ fn reject_foreign_slot_utxos(
         if u.script.is_empty() {
             continue;
         }
-        let script = crate::simd::hex::hex_string_to_bytes(&u.script);
+        // Sanitized: this string can come straight from a JS caller via
+        // `setUtxos`, and an unchecked decode of odd-length hex silently
+        // truncates rather than failing.
+        let hex = crate::wallet::sanitize_script_hex(&u.script);
+        if hex.is_empty() {
+            continue;
+        }
+        let script = crate::simd::hex::hex_string_to_bytes(&hex);
         if script == own_script {
             continue;
         }
@@ -587,9 +665,23 @@ pub fn create_shielding_transaction(
         return Err(no_spendable_utxos_error(wallet));
     }
 
-    // Shield dest: 0 transparent outs, 2 sapling outs (destination + change-back-to-self would
-    // need a shield change address, but currently change goes back as transparent).
-    let transparent_output_count: u64 = 0;
+    // Shield dest: 2 sapling outs (the destination plus the padding output the
+    // builder adds so a single-output shape is not leaked), and 1 transparent
+    // out for change, which is emitted below whenever `change > 0`.
+    //
+    // That transparent output used to be counted as 0. The transaction emitted
+    // it anyway, and the estimate survived only because the other allowances
+    // are generous: measured against a real mainnet shielding transaction
+    // (4cd0838d, 2162 bytes) the model came to 2176, so 14 bytes of margin
+    // absorbed a 34-byte output it had not budgeted for. At the shielded rate
+    // of 1000 sat/byte that margin is worth 14,000 sat and rests on the input
+    // allowance over-estimating by ~33 bytes, which is luck rather than
+    // design.
+    //
+    // Counting it is the safe direction: assuming change up front can only
+    // over-estimate, exactly as `select_transparent_utxos` already does on the
+    // transparent path.
+    let transparent_output_count: u64 = 1;
     let sapling_output_count: u64 = 2;
 
     let mut selected: Vec<SerializedUTXO> = Vec::new();

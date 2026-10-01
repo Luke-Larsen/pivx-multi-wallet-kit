@@ -11,6 +11,16 @@ pub const COIN: u64 = 100_000_000;
 pub const PIVX_COIN_TYPE: u32 = 119;
 
 /// Base58Check version byte for PIVX transparent pubkey addresses (produces `D...`).
+///
+/// **Shared with Dogecoin.** `base58Prefixes[PUBKEY_ADDRESS]` is 30 on both
+/// chains (`dogecoin/dogecoin`, `src/chainparams.cpp`), so a PIVX address and a
+/// Dogecoin address are byte-identical in structure and neither carries
+/// anything that says which chain it belongs to. The version-byte check that
+/// cleanly separates PIVX from Litecoin therefore cannot separate PIVX from
+/// Dogecoin, and adding that chain needs a different guard decided before any
+/// code lands. See the same hazard already realised between Litecoin's legacy
+/// `3...` P2SH form and Bitcoin's, which `p2sh_prefixes_ambiguous` exists to
+/// refuse.
 pub const PIVX_PUBKEY_PREFIX: u8 = 30;
 
 /// Base58Check version byte for PIVX cold-staking addresses (produces `S...`).
@@ -71,6 +81,7 @@ pub const COINBASE_MATURITY: u32 = 100;
 /// unconditionally PIVX-only rather than taking a `Chain` they'd never
 /// use a second value of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum Chain {
     #[default]
     Pivx,
@@ -83,6 +94,23 @@ pub struct ChainParams {
     pub coin_type: u32,
     /// Base58Check version byte for a P2PKH address.
     pub pubkey_prefix: u8,
+    /// Base58Check version bytes for a P2SH address that unambiguously belongs
+    /// to this chain. Empty on a chain whose builder pays P2PKH only, which
+    /// keeps the address parser refusing P2SH there exactly as it did before.
+    pub p2sh_prefixes: &'static [u8],
+    /// P2SH version bytes this chain accepts but **shares with another chain**,
+    /// so an address carrying one cannot be attributed to a chain by looking at
+    /// it.
+    ///
+    /// Kept apart from `p2sh_prefixes` because the safe default for an
+    /// ambiguous address is to refuse it and say why. Paying one is a coin flip
+    /// on whether the recipient is watching this chain, and the loser loses the
+    /// money permanently.
+    pub p2sh_prefixes_ambiguous: &'static [u8],
+    /// Human-readable part for native segwit (bech32) addresses. `None` on a
+    /// chain without segwit, which makes every `hrp1...` address an error
+    /// rather than something to guess at.
+    pub bech32_hrp: Option<&'static str>,
     /// Base58Check version byte for a cold-staking address. `None` where the
     /// chain has no P2CS opcodes (Litecoin).
     pub staking_prefix: Option<u8>,
@@ -99,6 +127,14 @@ pub struct ChainParams {
 pub const PIVX: ChainParams = ChainParams {
     coin_type: PIVX_COIN_TYPE,
     pubkey_prefix: PIVX_PUBKEY_PREFIX,
+    // PIVX has P2SH addresses, but this kit's builder has never paid one and
+    // adding that is a separate decision with its own testing. Empty here
+    // keeps the parser's behaviour on PIVX byte-for-byte what it was.
+    p2sh_prefixes: &[],
+    p2sh_prefixes_ambiguous: &[],
+    // PIVX has no segwit. The `ps1...` prefix that looks bech32-shaped is a
+    // Sapling shielded payment address, routed long before this.
+    bech32_hrp: None,
     staking_prefix: Some(PIVX_STAKING_PREFIX),
     coinbase_maturity: COINBASE_MATURITY,
     msg_magic: "DarkNet Signed Message:\n",
@@ -115,6 +151,17 @@ pub const PIVX: ChainParams = ChainParams {
 ///
 /// * `coin_type`: SLIP-44 2.
 /// * `pubkey_prefix`: `PUBKEY_ADDRESS` 48 in `chainparams.cpp`.
+/// * `p2sh_prefixes`: `SCRIPT_ADDRESS2` 50 in `chainparams.cpp`, the `M...`
+///   form modern wallets display.
+/// * `p2sh_prefixes_ambiguous`: `SCRIPT_ADDRESS` 5, the older `3...` form.
+///   Litecoin Core accepts it, but it is **byte-identical to Bitcoin's**
+///   `SCRIPT_ADDRESS` (`kernel/chainparams.cpp`), so a `3...` string carries
+///   nothing that says which of the two chains it belongs to. Migrating to
+///   `M...` is exactly why Litecoin introduced `SCRIPT_ADDRESS2`. Held apart so
+///   the parser can refuse it by default and explain the hazard, rather than
+///   guess. Note Core's naming makes 5 the primary and 50 the alternate, which
+///   reads backwards next to what wallets actually show.
+/// * `bech32_hrp`: `bech32_hrp` in `chainparams.cpp`.
 /// * `coinbase_maturity`: `COINBASE_MATURITY` in `consensus/consensus.h`.
 /// * `msg_magic`: `MESSAGE_MAGIC` in `util/message.cpp`.
 /// * `fee_per_byte`: 10 sat/B is 10,000 sat/kB, matching the wallet default
@@ -127,6 +174,9 @@ pub const PIVX: ChainParams = ChainParams {
 pub const LITECOIN: ChainParams = ChainParams {
     coin_type: 2,
     pubkey_prefix: 0x30,
+    p2sh_prefixes: &[50],
+    p2sh_prefixes_ambiguous: &[5],
+    bech32_hrp: Some("ltc"),
     staking_prefix: None,
     coinbase_maturity: 100,
     msg_magic: "Litecoin Signed Message:\n",
