@@ -1,6 +1,6 @@
 //! Component-based fee estimation for PIVX and Litecoin transactions.
 
-use crate::params::Chain;
+use crate::params::{Chain, DustPolicy};
 
 /// Estimate the fee (in satoshis) for a shielded (v3) transaction by component
 /// count.
@@ -78,19 +78,46 @@ pub const DUST_RELAY_TX_FEE: u64 = 30_000;
 /// Smallest non-dust value for an output paying `script_len` bytes of script,
 /// on `chain`.
 ///
-/// Mirrors `GetDustThreshold` in `policy/policy.cpp`: the serialized output plus
-/// the 148 bytes an input spending it would cost, priced at the dust relay rate.
+/// Which model applies is the chain's own: see [`DustPolicy`].
 ///
-/// For PIVX this works out to 5460 sat for a P2PKH output (25-byte script) and
-/// 6240 sat for a cold-staking one (51-byte script): a delegation is bulkier
-/// to spend, so it has to be worth more to be worth creating.
+/// On a `PerByte` chain this mirrors `GetDustThreshold` in `policy/policy.cpp`:
+/// the serialized output plus the 148 bytes an input spending it would cost,
+/// priced at the dust relay rate. For PIVX and Litecoin that works out to 5460
+/// sat for a P2PKH output (25-byte script) and 6240 sat for a cold-staking one
+/// (51-byte script): a delegation is bulkier to spend, so it has to be worth
+/// more to be worth creating.
+///
+/// On a `Flat` chain `script_len` is accepted and ignored, because the chain
+/// ignores it. The parameter stays in the signature so callers do not have to
+/// know which model they are on.
 pub fn dust_threshold(chain: Chain, script_len: usize) -> u64 {
-    // value (8) + the script's length prefix + the script itself.
-    let prefix = if script_len < 0xfd { 1 } else { 3 };
-    let txout_size = 8 + prefix + script_len;
-    // 32 txid + 4 vout + 1 script length + 107 scriptSig + 4 sequence.
-    let spend_size = 148;
-    (chain.params().dust_relay_fee * (txout_size + spend_size) as u64) / 1000
+    dust_threshold_for(chain.params().dust, script_len)
+}
+
+/// As [`dust_threshold`], for a policy given directly rather than looked up
+/// from a chain.
+///
+/// Split out so each branch can be exercised without a chain that uses it. The
+/// `Flat` variant would otherwise be unreachable until Dogecoin exists, and
+/// shipping an untested branch that later decides whether a user's output is
+/// refused is how the dust constant went wrong the first time.
+pub fn dust_threshold_for(policy: DustPolicy, script_len: usize) -> u64 {
+    match policy {
+        DustPolicy::PerByte { sat_per_kb } => {
+            // value (8) + the script's length prefix + the script itself.
+            let prefix = if script_len < 0xfd { 1 } else { 3 };
+            let txout_size = 8 + prefix + script_len;
+            // 32 txid + 4 vout + 1 script length + 107 scriptSig + 4 sequence.
+            let spend_size = 148;
+            (sat_per_kb * (txout_size + spend_size) as u64) / 1000
+        }
+        // Size is irrelevant here, and the higher of the two limits is the one
+        // to enforce. An output over the relay limit but under the mining limit
+        // propagates and then never confirms, which strands a user's coins in a
+        // transaction that looks accepted. Refusing to build it is the kinder
+        // failure, and the only one they can act on.
+        DustPolicy::Flat { mine, .. } => mine,
+    }
 }
 
 /// Whether an output of `value` paying `script_len` bytes of script is dust
