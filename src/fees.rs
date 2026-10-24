@@ -2,7 +2,8 @@
 
 use crate::params::Chain;
 
-/// Estimate the fee (in satoshis) for a transaction by component count.
+/// Estimate the fee (in satoshis) for a shielded (v3) transaction by component
+/// count.
 ///
 /// Flat rate of 1000 sat/byte applied to a conservative size model:
 /// - 948 bytes per Sapling output
@@ -10,6 +11,34 @@ use crate::params::Chain;
 /// - 180 bytes per transparent input (signed P2PKH)
 /// - 34 bytes per transparent output
 /// - 100 bytes of transaction overhead
+///
+/// **The 1000 is network-enforced, not a safety margin.** PIVX charges shielded
+/// transactions one hundred times the ordinary relay minimum, in
+/// `GetShieldedTxMinFee` (`src/validation.cpp`):
+///
+/// ```text
+/// unsigned int K = DEFAULT_SHIELDEDTXFEE_K;   // Fixed (100) for now
+/// CAmount nMinFee = ::minRelayTxFee.GetFee(tx.GetTotalSize()) * K;
+/// ```
+///
+/// with `DEFAULT_SHIELDEDTXFEE_K = 100` (`src/validation.h`) and
+/// `minRelayTxFee = CFeeRate(10000)`, which is 10 sat/byte. So 10 * 100 = 1000,
+/// exactly. Do not "optimise" this down to the transparent rate: a shielded
+/// transaction paying 10 sat/byte is rejected outright.
+///
+/// The figure looks like a hundredfold over-charge next to
+/// [`estimate_raw_transparent_fee`], and was once reported as one. It is not.
+///
+/// One consequence deserves attention: because the rate is multiplied by
+/// **actual** total size on the node's side, every byte this model
+/// under-estimates costs 1000 sat rather than 10. The transparent path has
+/// `tests/fee_covers_relay_minimum.rs` proving its model covers real serialized
+/// bytes; the shielded path has no equivalent, and that gap matters a hundred
+/// times more here.
+///
+/// Core also caps the fee at `GetShieldedTxMinFee(tx) * 100`, so a wildly
+/// over-paying shielded transaction is refused too: this is a window, not a
+/// floor.
 #[inline]
 pub fn estimate_fee(
     transparent_input_count: u64,
@@ -93,5 +122,39 @@ pub fn estimate_raw_transparent_fee_with_extra(
     extra_bytes: usize,
 ) -> u64 {
     let est_size = input_count * 150 + output_count * 34 + extra_bytes + 10;
+    (est_size as u64) * chain.params().fee_per_byte
+}
+
+/// Serialized size of one output paying `script_len` bytes of script.
+///
+/// 8 bytes of value, the script's length prefix, then the script. The flat
+/// 34-byte figure the count-based estimators use is this for a 25-byte P2PKH
+/// script, so an all-P2PKH transaction prices identically either way.
+#[inline]
+pub const fn output_size(script_len: usize) -> usize {
+    let prefix = if script_len < 0xfd { 1 } else { 3 };
+    8 + prefix + script_len
+}
+
+/// As [`estimate_raw_transparent_fee`], sizing each output by the script that
+/// actually pays it rather than assuming all of them are P2PKH.
+///
+/// Needed once a chain can pay more than one address form. A P2SH output is
+/// 32 bytes and a P2WPKH one 31, both under the flat 34, while a P2WSH output
+/// is 43 and over it. Charging the flat figure for a P2WSH recipient
+/// under-pays, and under-paying is the direction that strands a transaction
+/// unconfirmed, so the difference is not one to round away.
+///
+/// The `extra_bytes` escape hatch on
+/// [`estimate_raw_transparent_fee_with_extra`] cannot express this: it only
+/// adds, and two of the three new forms are smaller than the baseline.
+#[inline]
+pub fn estimate_raw_transparent_fee_for_scripts(
+    chain: Chain,
+    input_count: usize,
+    output_script_lens: &[usize],
+) -> u64 {
+    let outputs: usize = output_script_lens.iter().copied().map(output_size).sum();
+    let est_size = input_count * 150 + outputs + 10;
     (est_size as u64) * chain.params().fee_per_byte
 }

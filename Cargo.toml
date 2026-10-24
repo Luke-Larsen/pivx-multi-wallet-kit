@@ -90,6 +90,10 @@ bip32 = "0.5"
 bip39 = "2"
 bs58 = "0.5.1"
 base64 = "0.22"
+# Segwit (bech32) address decoding, for paying Litecoin ltc1... destinations.
+# Already in the tree via zcash_address/zcash_keys, which use it for Sapling
+# addresses, so naming it directly costs nothing new.
+bech32 = "0.11"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
