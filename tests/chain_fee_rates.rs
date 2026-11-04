@@ -21,7 +21,7 @@
 //! fee is passing a chain, `transparentTxFor` rather than `transparentTx`.
 
 use pivx_wallet_kit::fees;
-use pivx_wallet_kit::params::{Chain, LITECOIN, PIVX};
+use pivx_wallet_kit::params::{Chain, DustPolicy, LITECOIN, PIVX};
 
 #[test]
 fn the_two_chains_transparent_rates_currently_coincide() {
@@ -32,8 +32,8 @@ fn the_two_chains_transparent_rates_currently_coincide() {
          `Fee.transparentTx` and move them to `transparentTxFor`."
     );
     assert_eq!(
-        PIVX.dust_relay_fee, LITECOIN.dust_relay_fee,
-        "PIVX and Litecoin no longer share a dust rate. Anything quoting a single 5460 sat \
+        PIVX.dust, LITECOIN.dust,
+        "PIVX and Litecoin no longer share a dust policy. Anything quoting a single 5460 sat \
          threshold for both, including the wasm docs, is now wrong for one of them."
     );
 }
@@ -53,8 +53,12 @@ fn the_rates_are_the_values_each_chains_node_requires() {
 
     // Both chains' `DUST_RELAY_TX_FEE` in `src/policy/policy.h`. Bitcoin's is
     // 3,000, which is what Litecoin's was set to by mistake and MWK-1 fixed.
-    assert_eq!(PIVX.dust_relay_fee, 30_000);
-    assert_eq!(LITECOIN.dust_relay_fee, 30_000);
+    // Both are rate-based at 30,000 sat/kB. Matching on the variant rather than
+    // reading a number keeps this honest once a flat-limit chain exists: a
+    // chain that switched models would fail here instead of silently comparing
+    // against a field that no longer means the same thing.
+    assert_eq!(PIVX.dust, DustPolicy::PerByte { sat_per_kb: 30_000 });
+    assert_eq!(LITECOIN.dust, DustPolicy::PerByte { sat_per_kb: 30_000 });
 }
 
 #[test]

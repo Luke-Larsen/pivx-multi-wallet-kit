@@ -218,6 +218,22 @@ impl Wallet {
         Ok(Wallet { inner, locked: false })
     }
 
+    /// As [`Wallet::create`], for a Dogecoin wallet: transparent-only, like
+    /// Litecoin, and with no segwit at all, so it pays `D...` and `9.../A...`
+    /// destinations only.
+    ///
+    /// **A Dogecoin address is indistinguishable from a PIVX one.** Both chains
+    /// use Base58Check version byte 30, so nothing here can tell them apart and
+    /// a wallet created with this constructor will pay a PIVX address as though
+    /// it were a Dogecoin one. Confirming the chain of a destination before
+    /// sending is the consumer's responsibility; see the README.
+    #[wasm_bindgen(js_name = createDogecoin)]
+    pub fn create_dogecoin(current_height: u32) -> Result<Wallet, JsError> {
+        let inner =
+            crate::wallet::create_new_wallet(Chain::Dogecoin, current_height).map_err(js_err)?;
+        Ok(Wallet { inner, locked: false })
+    }
+
     /// Import from an existing BIP39 mnemonic.
     #[wasm_bindgen(js_name = fromMnemonic)]
     pub fn from_mnemonic(mnemonic: &str, current_height: u32) -> Result<Wallet, JsError> {
@@ -230,6 +246,16 @@ impl Wallet {
     #[wasm_bindgen(js_name = fromMnemonicLitecoin)]
     pub fn from_mnemonic_litecoin(mnemonic: &str, current_height: u32) -> Result<Wallet, JsError> {
         let inner = crate::wallet::import_wallet(Chain::Litecoin, mnemonic, current_height)
+            .map_err(js_err)?;
+        Ok(Wallet { inner, locked: false })
+    }
+
+    /// As [`Wallet::from_mnemonic`], for a Dogecoin wallet. See
+    /// [`Wallet::create_dogecoin`] for the address-collision warning that
+    /// applies to every Dogecoin send.
+    #[wasm_bindgen(js_name = fromMnemonicDogecoin)]
+    pub fn from_mnemonic_dogecoin(mnemonic: &str, current_height: u32) -> Result<Wallet, JsError> {
+        let inner = crate::wallet::import_wallet(Chain::Dogecoin, mnemonic, current_height)
             .map_err(js_err)?;
         Ok(Wallet { inner, locked: false })
     }
@@ -1368,6 +1394,22 @@ pub fn verify_message_litecoin(
     signature_b64: &str,
 ) -> Result<bool, JsError> {
     crate::messages::verify_message(Chain::Litecoin, address, message, signature_b64)
+        .map_err(js_err)
+}
+
+/// As [`verify_message`], for a Dogecoin Core-format signature.
+///
+/// Unlike the address itself, a signature *does* distinguish Dogecoin from
+/// PIVX: the two chains use different magic strings, so a PIVX signature fails
+/// to verify here and vice versa. That makes message signing the one place the
+/// shared version byte does not bite.
+#[wasm_bindgen(js_name = verifyMessageDogecoin)]
+pub fn verify_message_dogecoin(
+    address: &str,
+    message: &str,
+    signature_b64: &str,
+) -> Result<bool, JsError> {
+    crate::messages::verify_message(Chain::Dogecoin, address, message, signature_b64)
         .map_err(js_err)
 }
 

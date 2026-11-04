@@ -9,9 +9,10 @@
 //! Usage: mainnet_test <command> [args...]   (mnemonic from $TEST_MNEMONIC)
 //!
 //! `$TEST_CHAIN` selects the chain: unset or `pivx` for PIVX, `litecoin`/`ltc`
-//! for Litecoin. It defaults to PIVX so every existing invocation behaves
-//! exactly as it did. Litecoin is transparent-only, so the shield, sync and
-//! cold-staking commands refuse on it rather than pretending.
+//! for Litecoin, `dogecoin`/`doge` for Dogecoin. It defaults to PIVX so every
+//! existing invocation behaves exactly as it did. Litecoin and Dogecoin are
+//! transparent-only, so the shield, sync and cold-staking commands refuse on
+//! them rather than pretending.
 //!
 //! `examples/fetch-utxos.sh <address> <out.json>` is the companion fetcher: it
 //! joins each funding transaction's `scriptPubKey` onto the UTXO entries, which
@@ -37,7 +38,8 @@ fn chain() -> Chain {
     match std::env::var("TEST_CHAIN").unwrap_or_default().to_ascii_lowercase().as_str() {
         "" | "pivx" | "piv" => Chain::Pivx,
         "litecoin" | "ltc" => Chain::Litecoin,
-        other => panic!("unknown TEST_CHAIN {other:?}: want pivx or litecoin"),
+        "dogecoin" | "doge" => Chain::Dogecoin,
+        other => panic!("unknown TEST_CHAIN {other:?}: want pivx, litecoin or dogecoin"),
     }
 }
 
@@ -46,6 +48,7 @@ fn unit() -> &'static str {
     match chain() {
         Chain::Pivx => "PIV",
         Chain::Litecoin => "LTC",
+        Chain::Dogecoin => "DOGE",
     }
 }
 
@@ -53,8 +56,8 @@ fn unit() -> &'static str {
 fn pivx_only(cmd: &str) -> Result<(), Box<dyn Error>> {
     if chain() != Chain::Pivx {
         return Err(format!(
-            "`{cmd}` is PIVX-only: Litecoin has no shielded pool and no cold staking, so there \
-             is nothing here to exercise"
+            "`{cmd}` is PIVX-only: no other chain here has a shielded pool or cold staking, \
+             so there is nothing to exercise"
         )
         .into());
     }
@@ -112,7 +115,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("stake   {}", cs::encode_staking_address(&cs::owner_hash_from_seed(&sd, 0, 0)?));
                 println!("shield  {}", keys::get_default_address(&w.extfvk)?);
             } else {
-                println!("(no staking or shield address: Litecoin has neither)");
+                println!("(no staking or shield address: this chain has neither)");
             }
         }
 
