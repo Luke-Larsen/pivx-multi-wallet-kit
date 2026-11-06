@@ -23,11 +23,17 @@ case "$(echo "${TEST_CHAIN:-pivx}" | tr '[:upper:]' '[:lower:]')" in
   # reshapes the response below. Reshaping in the fetcher keeps the kit's single
   # UTXO parser untouched: one ingest path, already tested, for both chains.
   litecoin|ltc)     API="https://litecoinspace.org/api";     JOIN_SCRIPTS=0 ;;
-  *) echo "unknown TEST_CHAIN '$TEST_CHAIN': want pivx or litecoin" >&2; exit 2 ;;
+  # Dogecoin's Trezor Blockbook instances are Cloudflare-gated like Litecoin's,
+  # and blockchair rejects this host's IP. dogechain.info answers plainly and,
+  # usefully, returns each output's scriptPubKey inline, so no second request is
+  # needed to join scripts.
+  dogecoin|doge)    API="https://dogechain.info/api/v1";       JOIN_SCRIPTS=0 ;;
+  *) echo "unknown TEST_CHAIN '$TEST_CHAIN': want pivx, litecoin or dogecoin" >&2; exit 2 ;;
 esac
 
 case "$(echo "${TEST_CHAIN:-pivx}" | tr '[:upper:]' '[:lower:]')" in
   litecoin|ltc) RAW=$(curl -s --max-time 30 "$API/address/$ADDR/utxo") ;;
+  dogecoin|doge) RAW=$(curl -sL --max-time 30 "$API/address/unspent/$ADDR") ;;
   *)            RAW=$(curl -s --max-time 30 "$API/utxo/$ADDR?confirmed=true") ;;
 esac
 
@@ -51,7 +57,37 @@ utxos = json.load(sys.stdin)
 # to the Blockbook shape so `parse_blockbook_utxos` stays the one ingest path,
 # and drop anything unconfirmed, which Esplora returns and the PIVX query filters
 # server-side.
-if chain in ("litecoin", "ltc"):
+if chain in ("dogecoin", "doge"):
+    # dogechain.info nests the list under `unspent_outputs` and names its fields
+    # differently: `tx_output_n` for vout, `value` as an integer, and no height,
+    # only `confirmations`. Its `tx_hash` was verified to be in the conventional
+    # display orientation (sha256d reversed) by recomputing it from the `tx_hex`
+    # the same response carries: a reversed txid would have produced
+    # transactions spending outpoints that do not exist.
+    #
+    # `height` is reconstructed from the tip so maturity logic has something to
+    # work with. `script` arrives inline here, which is why no join is needed.
+    tip = 0
+    try:
+        tip = json.load(urllib.request.urlopen(
+            "https://api.blockcypher.com/v1/doge/main", timeout=30))["height"]
+    except Exception:
+        pass
+    out = []
+    for u in utxos.get("unspent_outputs", []) if isinstance(utxos, dict) else []:
+        conf = int(u.get("confirmations", 0))
+        if conf < 1:
+            continue
+        out.append({
+            "txid": u["tx_hash"],
+            "vout": u["tx_output_n"],
+            "value": u["value"],
+            "height": (tip - conf + 1) if tip else 0,
+            "confirmations": conf,
+            "script": u.get("script", ""),
+        })
+    utxos = out
+elif chain in ("litecoin", "ltc"):
     out = []
     for u in utxos:
         st = u.get("status", {})

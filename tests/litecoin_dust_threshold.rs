@@ -20,7 +20,7 @@
 
 mod common;
 
-use pivx_wallet_kit::params::{Chain, LITECOIN, PIVX};
+use pivx_wallet_kit::params::{Chain, DustPolicy, LITECOIN, PIVX};
 use pivx_wallet_kit::transparent::builder::{
     Recipient, create_raw_transparent_transaction_to_many,
 };
@@ -42,6 +42,18 @@ const BITCOIN_CORE_DUST_RELAY_TX_FEE: u64 = 3_000;
 /// A 25-byte P2PKH output priced at Litecoin's dust rate: 30,000 * (8 + 1 + 25
 /// + 148) / 1000. This is the figure `GetDustThreshold` yields on a real node.
 const P2PKH_DUST_SAT: u64 = 5_460;
+
+/// Litecoin's dust rate, unwrapped from its policy.
+///
+/// Panics on a non-rate policy rather than papering over it: if Litecoin ever
+/// moves to a flat limit, this file's premise changes and it should fail
+/// loudly rather than quietly skip.
+fn litecoin_dust_rate() -> u64 {
+    match LITECOIN.dust {
+        DustPolicy::PerByte { sat_per_kb } => sat_per_kb,
+        other => panic!("Litecoin's dust policy is no longer rate-based: {other:?}"),
+    }
+}
 
 fn seed() -> Vec<u8> {
     bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap().to_seed("").to_vec()
@@ -74,11 +86,11 @@ fn send(utxo_amount: u64, pay: u64) -> Result<Vec<u8>, Box<dyn Error>> {
 #[test]
 fn litecoin_dust_rate_comes_from_litecoin_core() {
     assert_eq!(
-        LITECOIN.dust_relay_fee, LITECOIN_CORE_DUST_RELAY_TX_FEE,
-        "LITECOIN.dust_relay_fee must be Litecoin Core's DUST_RELAY_TX_FEE"
+        litecoin_dust_rate(), LITECOIN_CORE_DUST_RELAY_TX_FEE,
+        "Litecoin's dust rate must be Litecoin Core's DUST_RELAY_TX_FEE"
     );
     assert_ne!(
-        LITECOIN.dust_relay_fee, BITCOIN_CORE_DUST_RELAY_TX_FEE,
+        litecoin_dust_rate(), BITCOIN_CORE_DUST_RELAY_TX_FEE,
         "this is Bitcoin Core's dust rate, not Litecoin's: Litecoin is ten times higher"
     );
 }
@@ -88,7 +100,7 @@ fn both_chains_price_dust_the_same() {
     // Not a coincidence worth hiding: PIVX and Litecoin both carry 30,000, so
     // a P2PKH output has the same floor on either chain. Documentation that
     // quotes 5460 is therefore correct for both.
-    assert_eq!(LITECOIN.dust_relay_fee, PIVX.dust_relay_fee);
+    assert_eq!(LITECOIN.dust, PIVX.dust);
     assert_eq!(
         fees::dust_threshold(Chain::Litecoin, 25),
         fees::dust_threshold(Chain::Pivx, 25)
